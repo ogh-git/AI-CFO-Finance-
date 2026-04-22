@@ -1,0 +1,219 @@
+/* ── Reset & base ────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --surface2:  #1c2333;
+  --border:    #30363d;
+  --text:      #e6edf3;
+  --text2:     #8b949e;
+  --primary:   #58a6ff;
+  --green:     #3fb950;
+  --red:       #f85149;
+  --yellow:    #d29922;
+  --purple:    #bc8cff;
+  --teal:      #39d353;
+  --radius:    10px;
+  --shadow:    0 1px 3px rgba(0,0,0,.4);
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ── Layout ──────────────────────────────────────── */
+.dashboard { max-width: 1600px; margin: 0 auto; padding: 0 20px 40px; }
+
+/* ── Header ──────────────────────────────────────── */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  flex-wrap: wrap; gap: 12px;
+}
+.header-left { display: flex; align-items: center; gap: 14px; }
+.header-logo {
+  width: 36px; height: 36px; border-radius: 8px;
+  background: linear-gradient(135deg, #1f6feb, #388bfd);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 700; color: #fff;
+}
+.header h1 { font-size: 18px; font-weight: 600; color: var(--text); }
+.header-sub { font-size: 12px; color: var(--text2); margin-top: 1px; }
+.header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* ── Company tabs ─────────────────────────────────── */
+.company-tabs { display: flex; gap: 6px; }
+.company-tab {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+  background: transparent; color: var(--text2); cursor: pointer;
+  font-size: 13px; font-weight: 500; transition: all .15s;
+}
+.company-tab:hover  { border-color: var(--primary); color: var(--primary); }
+.company-tab.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+/* ── Controls bar ─────────────────────────────────── */
+.controls {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 0 18px; flex-wrap: wrap;
+}
+.controls label { font-size: 12px; color: var(--text2); }
+.controls select, .controls input {
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); border-radius: 6px; padding: 5px 10px;
+  font-size: 13px; outline: none;
+}
+.controls select:focus, .controls input:focus { border-color: var(--primary); }
+.refresh-info { margin-left: auto; font-size: 12px; color: var(--text2); }
+
+.btn {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); cursor: pointer;
+  font-size: 13px; font-weight: 500; transition: all .15s;
+}
+.btn:hover { border-color: var(--primary); color: var(--primary); }
+.btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn.primary:hover { background: #388bfd; }
+
+/* ── KPI Grid ─────────────────────────────────────── */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  box-shadow: var(--shadow);
+  position: relative;
+  overflow: hidden;
+}
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+.kpi-card.green::before  { background: var(--green); }
+.kpi-card.red::before    { background: var(--red); }
+.kpi-card.blue::before   { background: var(--primary); }
+.kpi-card.yellow::before { background: var(--yellow); }
+.kpi-card.purple::before { background: var(--purple); }
+.kpi-card.teal::before   { background: var(--teal); }
+
+.kpi-label { font-size: 11px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; }
+.kpi-value { font-size: 26px; font-weight: 700; color: var(--text); line-height: 1.1; margin-bottom: 4px; }
+.kpi-sub   { font-size: 12px; color: var(--text2); }
+.kpi-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11px; font-weight: 600;
+  padding: 2px 7px; border-radius: 20px; margin-top: 6px;
+}
+.kpi-badge.pos { background: rgba(63,185,80,.15); color: var(--green); }
+.kpi-badge.neg { background: rgba(248,81,73,.15);  color: var(--red); }
+
+/* ── Charts row ──────────────────────────────────── */
+.charts-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+@media (max-width: 1100px) { .charts-row { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 700px)  { .charts-row { grid-template-columns: 1fr; } }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow);
+}
+.card-title {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+}
+.card-title span { font-size: 11px; color: var(--text2); font-weight: 400; }
+
+/* ── Tables ──────────────────────────────────────── */
+.tables-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+@media (max-width: 900px) { .tables-row { grid-template-columns: 1fr; } }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th {
+  text-align: right; padding: 8px 10px;
+  font-size: 11px; font-weight: 600; color: var(--text2);
+  text-transform: uppercase; letter-spacing: .4px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+thead th:first-child { text-align: left; }
+tbody tr { border-bottom: 1px solid rgba(48,54,61,.5); transition: background .1s; }
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: var(--surface2); }
+tbody td { padding: 8px 10px; text-align: right; color: var(--text); }
+tbody td:first-child { text-align: left; color: var(--text); font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.td-overdue { color: var(--red) !important; }
+.td-warn    { color: var(--yellow) !important; }
+
+/* ── P&L detail ──────────────────────────────────── */
+.pnl-section { margin-bottom: 24px; }
+.pnl-group-header {
+  background: var(--surface2);
+  padding: 8px 10px;
+  font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .6px;
+  color: var(--text2); border-radius: 4px;
+}
+.pnl-total-row td { font-weight: 700; border-top: 1px solid var(--border); }
+
+/* ── Skeleton / loading ──────────────────────────── */
+.skeleton {
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface2) 50%, var(--surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 6px;
+}
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* ── Tabs (P&L / BS / GL) ────────────────────────── */
+.section-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.section-tab {
+  padding: 5px 14px; border-radius: 20px;
+  border: 1px solid var(--border);
+  background: transparent; color: var(--text2);
+  cursor: pointer; font-size: 12px; font-weight: 500;
+}
+.section-tab.active { background: var(--surface2); border-color: var(--primary); color: var(--primary); }
+
+/* ── Error banner ────────────────────────────────── */
+.error-banner {
+  background: rgba(248,81,73,.1); border: 1px solid var(--red);
+  color: var(--red); border-radius: 8px; padding: 12px 16px;
+  margin-bottom: 16px; font-size: 13px;
+}
+
+/* ── Tooltip (recharts custom) ───────────────────── */
+.custom-tooltip {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 14px;
+  font-size: 12px; color: var(--text);
+}
+.custom-tooltip .label { font-weight: 600; margin-bottom: 6px; }
+.custom-tooltip .item  { display: flex; justify-content: space-between; gap: 20px; }
