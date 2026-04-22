@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { api, fmt, MONTHS } from './api'
-import KPICard     from './components/KPICard'
+import KPICard      from './components/KPICard'
 import MonthlyChart from './components/MonthlyChart'
-import AgingDonut  from './components/AgingDonut'
-import AgingTable  from './components/AgingTable'
-import PnLDetail   from './components/PnLDetail'
+import AgingDonut   from './components/AgingDonut'
+import AgingTable   from './components/AgingTable'
+import PnLDetail    from './components/PnLDetail'
 import BalanceSheet from './components/BalanceSheet'
+import ChatPanel    from './components/ChatPanel'
 
 const COMPANIES   = [
   { id: 'all',       name: 'All Companies' },
@@ -117,7 +118,15 @@ export default function App() {
   const [autoRefresh,   setAutoRefresh]   = useState(true)
   const [interval,      setInterval_]     = useState(300)
   const [lastRefreshed, setLastRefreshed] = useState(null)
+  const [exportOpen,    setExportOpen]    = useState(false)
+  const [chatOpen,      setChatOpen]      = useState(false)
   const timerRef = useRef(null)
+
+  const makeExportUrl = (type) => {
+    const p = new URLSearchParams({ db, year, month })
+    if (companyId) p.set('company_id', companyId)
+    return `/api/export/${type}?${p}`
+  }
 
   // load sub-companies when db changes (skip for 'all')
   useEffect(() => {
@@ -275,6 +284,22 @@ export default function App() {
           {loading ? 'Loading…' : '↻ Refresh'}
         </button>
 
+        <div className="export-wrap">
+          <button className="btn" onClick={() => setExportOpen(v => !v)}>
+            ↓ Export
+          </button>
+          {exportOpen && (
+            <div className="export-menu" onMouseLeave={() => setExportOpen(false)}>
+              <a href={makeExportUrl('excel')} onClick={() => setExportOpen(false)}>
+                Excel (.xlsx) — all sheets
+              </a>
+              <a href={makeExportUrl('pdf')} onClick={() => setExportOpen(false)}>
+                PDF Report
+              </a>
+            </div>
+          )}
+        </div>
+
         <div className="refresh-info">
           {lastRefreshed && `Updated ${lastRefreshed.toLocaleTimeString()}`}
         </div>
@@ -356,6 +381,25 @@ export default function App() {
       {detailTab === 'Balance Sheet' && (
         <BalanceSheet data={balanceSheet} />
       )}
+
+      {/* ── AI Chat ── */}
+      <button className="chat-fab" onClick={() => setChatOpen(v => !v)} title="AI CFO Assistant">
+        AI
+      </button>
+      <ChatPanel
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        context={{
+          company_name: COMPANIES.find(c => c.id === db)?.name || db,
+          db, year, month,
+          company_id: companyId,
+          kpis:         kpis         || {},
+          monthly_pnl:  monthlyPnl,
+          ar_customers: arCustomers.slice(0, 10),
+          ap_vendors:   apVendors.slice(0, 10),
+          pnl_detail:   pnlDetail,
+        }}
+      />
 
     </div>
   )

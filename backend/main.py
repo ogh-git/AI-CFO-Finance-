@@ -1,14 +1,45 @@
+import io
 import logging
 import os
 import ssl
 import decimal
+from collections import defaultdict
 from datetime import date
-from typing import Any
+from typing import Any, List, Optional
 
 import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+# ── optional heavy deps ────────────────────────────────
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers as xl_num
+    from openpyxl.utils import get_column_letter
+    XLSX_OK = True
+except ImportError:
+    XLSX_OK = False
+
+try:
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.units import cm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    PDF_OK = True
+except ImportError:
+    PDF_OK = False
+
+try:
+    import anthropic as ant
+    ANT_OK = True
+except ImportError:
+    ANT_OK = False
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -540,3 +571,464 @@ async def invoices(db: str = Query("ogh-live"), limit: int = Query(30)):
     """
     rows = await fetch(db, sql, limit)
     return {"data": rows}
+
+
+# ─────────────────────────────────────────────
+# /api/export/excel
+# ─────────────────────────────────────────────
+@app.get("/api/export/excel")
+async def export_excel(
+    db: str = Query("ogh-live"),
+    year: int = Query(None),
+    month: int = Query(None),
+    company_id: int = Query(None),
+):
+    if not XLSX_OK:
+        raise HTTPException(501, "openpyxl not installed")
+    today_dt = date.today()
+    y = year or today_dt.year
+    m = month or today_dt.month
+
+    kpis_d   = await kpis(db=db, year=y, month=m, company_id=company_id)
+    pnl_d    = await monthly_pnl(db=db, company_id=company_id)
+    ar_c     = await ar_customers(db=db, limit=50, company_id=company_id)
+    ap_v     = await ap_vendors(db=db, limit=50, company_id=company_id)
+    pnl_det  = await pnl_detail(db=db, year=y, month=m, company_id=company_id)
+    bs_d     = await balance_sheet(db=db, company_id=company_id)
+
+    MONTHS_L = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    period_label = f"{MONTHS_L[m-1]} {y}"
+    company_label = DB_LABELS.get(db, db)
+
+    H_FILL = PatternFill("solid", fgColor="1A3A5C")
+    H_FONT = Font(bold=True, color="FFFFFF", size=10)
+    T_FILL = PatternFill("solid", fgColor="E8F0F7")
+    T_FONT = Font(bold=True, color="1A3A5C", size=10)
+    NUM_FMT = '#,##0.00'
+    BORDER = Border(
+        bottom=Side(style='thin', color='CCCCCC'),
+    )
+
+    def style_header(ws, cols, row=1):
+        for ci, col in enumerate(cols, 1):
+            cell = ws.cell(row=row, column=ci, value=col)
+            cell.font = H_FONT
+            cell.fill = H_FILL
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        ws.row_dimensions[row].height = 28
+
+    def style_total(ws, values, row):
+        for ci, v in enumerate(values, 1):
+            cell = ws.cell(row=row, column=ci, value=v)
+            cell.font = T_FONT
+            cell.fill = T_FILL
+            if isinstance(v, (int, float)) and ci > 1:
+                cell.number_format = NUM_FMT
+                cell.alignment = Alignment(horizontal='right')
+
+    def set_col_widths(ws, widths):
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+    wb = Workbook()
+
+    # ── Sheet 1: KPI Summary ──
+    ws = wb.active
+    ws.title = "KPI Summary"
+    ws.append([f"CFO Dashboard — {company_label} — {period_label}"])
+    ws['A1'].font = Font(bold=True, size=14, color="1A3A5C")
+    ws.append([])
+    style_header(ws, ["Metric", "Value"], row=3)
+    kpi_rows = [
+        ("Month Revenue",    kpis_d["month_revenue"]),
+        ("Month Expense",    kpis_d["month_expense"]),
+        ("Month Net Profit", kpis_d["month_profit"]),
+        ("Month Margin %",   kpis_d["month_margin"]),
+        ("YTD Revenue",      kpis_d["ytd_revenue"]),
+        ("YTD Expense",      kpis_d["ytd_expense"]),
+        ("YTD Net Profit",   kpis_d["ytd_profit"]),
+        ("YTD Margin %",     kpis_d["ytd_margin"]),
+        ("Total AR",         kpis_d["total_ar"]),
+        ("Overdue AR >30d",  kpis_d["overdue_ar"]),
+        ("Total AP",         kpis_d["total_ap"]),
+        ("Overdue AP >30d",  kpis_d["overdue_ap"]),
+    ]
+    for ri, (label, val) in enumerate(kpi_rows, 4):
+        ws.cell(row=ri, column=1, value=label).font = Font(size=10)
+        c = ws.cell(row=ri, column=2, value=float(val or 0))
+        c.number_format = NUM_FMT
+        c.alignment = Alignment(horizontal='right')
+        if ri % 2 == 0:
+            ws.cell(row=ri, column=1).fill = PatternFill("solid", fgColor="F5F8FC")
+            c.fill = PatternFill("solid", fgColor="F5F8FC")
+    set_col_widths(ws, [28, 18])
+
+    # ── Sheet 2: Monthly P&L ──
+    ws2 = wb.create_sheet("Monthly P&L")
+    style_header(ws2, ["Month", "Year", "Revenue", "Expense", "Net Profit"])
+    for ri, r in enumerate(pnl_d["data"], 2):
+        ws2.cell(ri, 1, r.get("year_month", "")).alignment = Alignment(horizontal='left')
+        ws2.cell(ri, 2, r.get("year", ""))
+        for ci, key in enumerate(["total_revenue", "total_expense", "net_profit"], 3):
+            c = ws2.cell(ri, ci, float(r.get(key) or 0))
+            c.number_format = NUM_FMT
+            c.alignment = Alignment(horizontal='right')
+    set_col_widths(ws2, [14, 8, 18, 18, 18])
+
+    # ── Sheet 3: AR by Customer ──
+    ws3 = wb.create_sheet("AR by Customer")
+    ar_cols = ["Customer", "Current", "1-30 Days", "31-60 Days", "61-90 Days", "Over 90 Days", "Total Outstanding"]
+    style_header(ws3, ar_cols)
+    for ri, r in enumerate(ar_c["data"], 2):
+        ws3.cell(ri, 1, r.get("customer", ""))
+        for ci, key in enumerate(["Current", "1-30 Days", "31-60 Days", "61-90 Days", "Over 90 Days", "total_outstanding"], 2):
+            c = ws3.cell(ri, ci, float(r.get(key) or 0))
+            c.number_format = NUM_FMT
+            c.alignment = Alignment(horizontal='right')
+    set_col_widths(ws3, [35, 14, 14, 14, 14, 14, 18])
+
+    # ── Sheet 4: AP by Vendor ──
+    ws4 = wb.create_sheet("AP by Vendor")
+    style_header(ws4, ["Vendor", "Current", "1-30 Days", "31-60 Days", "61-90 Days", "Over 90 Days", "Total Outstanding"])
+    for ri, r in enumerate(ap_v["data"], 2):
+        ws4.cell(ri, 1, r.get("vendor", ""))
+        for ci, key in enumerate(["Current", "1-30 Days", "31-60 Days", "61-90 Days", "Over 90 Days", "total_outstanding"], 2):
+            c = ws4.cell(ri, ci, float(r.get(key) or 0))
+            c.number_format = NUM_FMT
+            c.alignment = Alignment(horizontal='right')
+    set_col_widths(ws4, [35, 14, 14, 14, 14, 14, 18])
+
+    # ── Sheet 5: P&L Detail ──
+    ws5 = wb.create_sheet("P&L Detail")
+    style_header(ws5, ["Category", "Account Code", "Account Name", "Amount"])
+    for ri, r in enumerate(pnl_det["data"], 2):
+        ws5.cell(ri, 1, r.get("category", ""))
+        ws5.cell(ri, 2, r.get("account_code", ""))
+        ws5.cell(ri, 3, r.get("account_name", ""))
+        c = ws5.cell(ri, 4, float(r.get("amount") or 0))
+        c.number_format = NUM_FMT
+        c.alignment = Alignment(horizontal='right')
+    # totals by category
+    cats = defaultdict(float)
+    for r in pnl_det["data"]:
+        cats[r.get("category", "Other")] += float(r.get("amount") or 0)
+    ws5.append([])
+    ri = ws5.max_row + 1
+    style_total(ws5, ["TOTAL BY CATEGORY", "", "", ""], ri)
+    for cat, total in cats.items():
+        ri += 1
+        style_total(ws5, [cat, "", "", total], ri)
+    set_col_widths(ws5, [22, 16, 40, 18])
+
+    # ── Sheet 6: Balance Sheet ──
+    ws6 = wb.create_sheet("Balance Sheet")
+    style_header(ws6, ["Category", "Account Code", "Account Name", "Net Balance"])
+    for ri, r in enumerate(bs_d["data"], 2):
+        ws6.cell(ri, 1, r.get("category", ""))
+        ws6.cell(ri, 2, r.get("account_code", ""))
+        ws6.cell(ri, 3, r.get("account_name", ""))
+        c = ws6.cell(ri, 4, float(r.get("net_balance") or 0))
+        c.number_format = NUM_FMT
+        c.alignment = Alignment(horizontal='right')
+    cats2 = defaultdict(float)
+    for r in bs_d["data"]:
+        cats2[r.get("category", "Other")] += float(r.get("net_balance") or 0)
+    ws6.append([])
+    ri = ws6.max_row + 1
+    style_total(ws6, ["TOTAL BY CATEGORY", "", "", ""], ri)
+    for cat, total in cats2.items():
+        ri += 1
+        style_total(ws6, [cat, "", "", total], ri)
+    set_col_widths(ws6, [22, 16, 40, 18])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"cfo-{db}-{y}-{m:02d}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fname}"},
+    )
+
+
+# ─────────────────────────────────────────────
+# /api/export/pdf
+# ─────────────────────────────────────────────
+@app.get("/api/export/pdf")
+async def export_pdf(
+    db: str = Query("ogh-live"),
+    year: int = Query(None),
+    month: int = Query(None),
+    company_id: int = Query(None),
+):
+    if not PDF_OK:
+        raise HTTPException(501, "reportlab not installed")
+    today_dt = date.today()
+    y = year or today_dt.year
+    m = month or today_dt.month
+
+    kpis_d  = await kpis(db=db, year=y, month=m, company_id=company_id)
+    pnl_d   = await monthly_pnl(db=db, company_id=company_id)
+    ar_c    = await ar_customers(db=db, limit=20, company_id=company_id)
+    ap_v    = await ap_vendors(db=db, limit=20, company_id=company_id)
+    pnl_det = await pnl_detail(db=db, year=y, month=m, company_id=company_id)
+    bs_d    = await balance_sheet(db=db, company_id=company_id)
+
+    MONTHS_L = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    period_label   = f"{MONTHS_L[m-1]} {y}"
+    company_label  = DB_LABELS.get(db, db)
+
+    def n(v): return f"{float(v or 0):,.0f}"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=1.5*cm, rightMargin=1.5*cm,
+        topMargin=1.5*cm, bottomMargin=1.5*cm,
+    )
+    styles = getSampleStyleSheet()
+    title_style   = ParagraphStyle("t", parent=styles["Title"],   fontSize=16, textColor=rl_colors.HexColor("#1A3A5C"))
+    h2_style      = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=11, textColor=rl_colors.HexColor("#1A3A5C"), spaceAfter=4)
+    normal_style  = styles["Normal"]
+
+    NAVY   = rl_colors.HexColor("#1A3A5C")
+    LGREEN = rl_colors.HexColor("#D4EDDA")
+    LRED   = rl_colors.HexColor("#F8D7DA")
+    LGRAY  = rl_colors.HexColor("#F0F4F8")
+    WHITE  = rl_colors.white
+
+    def tbl_style(header_rows=1):
+        return TableStyle([
+            ("BACKGROUND",  (0, 0), (-1, header_rows-1), NAVY),
+            ("TEXTCOLOR",   (0, 0), (-1, header_rows-1), WHITE),
+            ("FONTNAME",    (0, 0), (-1, header_rows-1), "Helvetica-Bold"),
+            ("FONTSIZE",    (0, 0), (-1, -1), 8),
+            ("ROWBACKGROUNDS", (0, header_rows), (-1, -1), [WHITE, LGRAY]),
+            ("GRID",        (0, 0), (-1, -1), 0.25, rl_colors.HexColor("#CCCCCC")),
+            ("ALIGN",       (1, 0), (-1, -1), "RIGHT"),
+            ("ALIGN",       (0, 0), (0, -1), "LEFT"),
+            ("TOPPADDING",  (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ])
+
+    story = []
+    story.append(Paragraph(f"CFO Finance Report — {company_label}", title_style))
+    story.append(Paragraph(f"Period: {period_label}   |   Generated: {today_dt.strftime('%d %b %Y')}", normal_style))
+    story.append(Spacer(1, 0.4*cm))
+
+    # KPI table
+    story.append(Paragraph("Key Performance Indicators", h2_style))
+    kpi_data = [
+        ["Metric", "Current Month", "YTD"],
+        ["Revenue",    n(kpis_d["month_revenue"]),  n(kpis_d["ytd_revenue"])],
+        ["Expense",    n(kpis_d["month_expense"]),  n(kpis_d["ytd_expense"])],
+        ["Net Profit", n(kpis_d["month_profit"]),   n(kpis_d["ytd_profit"])],
+        ["Margin %",   f"{kpis_d['month_margin']}%", f"{kpis_d['ytd_margin']}%"],
+        ["Total AR",   n(kpis_d["total_ar"]),        "–"],
+        ["Overdue AR >30d", n(kpis_d["overdue_ar"]), "–"],
+        ["Total AP",   n(kpis_d["total_ap"]),        "–"],
+        ["Overdue AP >30d", n(kpis_d["overdue_ap"]), "–"],
+    ]
+    t = Table(kpi_data, colWidths=[6*cm, 5*cm, 5*cm])
+    t.setStyle(tbl_style())
+    story.append(t)
+    story.append(Spacer(1, 0.5*cm))
+
+    # Monthly P&L
+    story.append(Paragraph("Monthly P&L Trend (last 12 months)", h2_style))
+    pnl_rows = [["Month", "Revenue", "Expense", "Net Profit"]]
+    for r in pnl_d["data"][-12:]:
+        pnl_rows.append([
+            r.get("year_month", ""),
+            n(r.get("total_revenue")), n(r.get("total_expense")), n(r.get("net_profit"))
+        ])
+    t2 = Table(pnl_rows, colWidths=[4*cm, 5.5*cm, 5.5*cm, 5.5*cm])
+    t2.setStyle(tbl_style())
+    story.append(t2)
+    story.append(PageBreak())
+
+    # AR by Customer
+    story.append(Paragraph("AR Aging by Customer (Top 20)", h2_style))
+    ar_rows = [["Customer", "Current", "1-30d", "31-60d", "61-90d", ">90d", "Total"]]
+    for r in ar_c["data"]:
+        ar_rows.append([
+            (r.get("customer") or "")[:40],
+            n(r.get("Current")), n(r.get("1-30 Days")), n(r.get("31-60 Days")),
+            n(r.get("61-90 Days")), n(r.get("Over 90 Days")), n(r.get("total_outstanding")),
+        ])
+    t3 = Table(ar_rows, colWidths=[7*cm, 3.5*cm, 3.5*cm, 3.5*cm, 3.5*cm, 3.5*cm, 3.5*cm])
+    t3.setStyle(tbl_style())
+    story.append(t3)
+    story.append(Spacer(1, 0.5*cm))
+
+    # AP by Vendor
+    story.append(Paragraph("AP Aging by Vendor (Top 20)", h2_style))
+    ap_rows = [["Vendor", "Current", "1-30d", "31-60d", "61-90d", ">90d", "Total"]]
+    for r in ap_v["data"]:
+        ap_rows.append([
+            (r.get("vendor") or "")[:40],
+            n(r.get("Current")), n(r.get("1-30 Days")), n(r.get("31-60 Days")),
+            n(r.get("61-90 Days")), n(r.get("Over 90 Days")), n(r.get("total_outstanding")),
+        ])
+    t4 = Table(ap_rows, colWidths=[7*cm, 3.5*cm, 3.5*cm, 3.5*cm, 3.5*cm, 3.5*cm, 3.5*cm])
+    t4.setStyle(tbl_style())
+    story.append(t4)
+    story.append(PageBreak())
+
+    # P&L Detail
+    story.append(Paragraph(f"Profit & Loss Detail — {period_label}", h2_style))
+    cats_pnl = defaultdict(float)
+    for r in pnl_det["data"]:
+        cats_pnl[r.get("category", "Other")] += float(r.get("amount") or 0)
+    pnld_rows = [["Category", "Account Code", "Account Name", "Amount"]]
+    for r in pnl_det["data"]:
+        pnld_rows.append([
+            r.get("category",""), r.get("account_code",""),
+            (r.get("account_name",""))[:45], n(r.get("amount")),
+        ])
+    pnld_rows.append(["", "", "TOTAL BY CATEGORY", ""])
+    for cat, total in cats_pnl.items():
+        pnld_rows.append(["", "", cat, n(total)])
+    t5 = Table(pnld_rows, colWidths=[4.5*cm, 3.5*cm, 11*cm, 4*cm])
+    ts5 = tbl_style()
+    ts5.add("FONTNAME", (0, len(pnld_rows)-len(cats_pnl)-1), (-1,-1), "Helvetica-Bold")
+    t5.setStyle(ts5)
+    story.append(t5)
+    story.append(PageBreak())
+
+    # Balance Sheet
+    story.append(Paragraph("Balance Sheet (All Posted Transactions)", h2_style))
+    cats_bs = defaultdict(float)
+    for r in bs_d["data"]:
+        cats_bs[r.get("category","Other")] += float(r.get("net_balance") or 0)
+    bs_rows = [["Category", "Account Code", "Account Name", "Net Balance"]]
+    for r in bs_d["data"]:
+        bs_rows.append([
+            r.get("category",""), r.get("account_code",""),
+            (r.get("account_name",""))[:45], n(r.get("net_balance")),
+        ])
+    bs_rows.append(["", "", "TOTAL BY CATEGORY", ""])
+    for cat, total in cats_bs.items():
+        bs_rows.append(["", "", cat, n(total)])
+    t6 = Table(bs_rows, colWidths=[4.5*cm, 3.5*cm, 11*cm, 4*cm])
+    ts6 = tbl_style()
+    ts6.add("FONTNAME", (0, len(bs_rows)-len(cats_bs)-1), (-1,-1), "Helvetica-Bold")
+    t6.setStyle(ts6)
+    story.append(t6)
+
+    doc.build(story)
+    buf.seek(0)
+    fname = f"cfo-{db}-{y}-{m:02d}.pdf"
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={fname}"},
+    )
+
+
+# ─────────────────────────────────────────────
+# /api/chat  – AI CFO assistant
+# ─────────────────────────────────────────────
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatContext(BaseModel):
+    company_name: str = ""
+    db: str = "ogh-live"
+    year: int = 2025
+    month: int = 1
+    company_id: Optional[int] = None
+    kpis: dict = {}
+    monthly_pnl: List[dict] = []
+    ar_customers: List[dict] = []
+    ap_vendors: List[dict] = []
+    pnl_detail: List[dict] = []
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    context: ChatContext
+
+@app.post("/api/chat")
+async def chat_endpoint(req: ChatRequest):
+    if not ANT_OK:
+        raise HTTPException(501, "anthropic package not installed")
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "AI chat not configured — add ANTHROPIC_API_KEY to your .env file")
+
+    ctx = req.context
+    MONTHS_L = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    month_name = MONTHS_L[ctx.month - 1] if 1 <= ctx.month <= 12 else str(ctx.month)
+
+    def num(v):
+        try: return f"{float(v):,.0f}"
+        except: return "–"
+
+    lines = [
+        f"Company: {ctx.company_name}",
+        f"Reporting Period: {month_name} {ctx.year}",
+        "",
+        "=== Current Month ===",
+        f"Revenue:          {num(ctx.kpis.get('month_revenue'))}",
+        f"Expenses:         {num(ctx.kpis.get('month_expense'))}",
+        f"Net Profit:       {num(ctx.kpis.get('month_profit'))}",
+        f"Profit Margin:    {ctx.kpis.get('month_margin', '–')}%",
+        "",
+        "=== Year-to-Date ===",
+        f"YTD Revenue:      {num(ctx.kpis.get('ytd_revenue'))}",
+        f"YTD Expenses:     {num(ctx.kpis.get('ytd_expense'))}",
+        f"YTD Net Profit:   {num(ctx.kpis.get('ytd_profit'))}",
+        f"YTD Margin:       {ctx.kpis.get('ytd_margin', '–')}%",
+        "",
+        "=== Receivables & Payables ===",
+        f"Total AR:         {num(ctx.kpis.get('total_ar'))}",
+        f"Overdue AR >30d:  {num(ctx.kpis.get('overdue_ar'))}",
+        f"Total AP:         {num(ctx.kpis.get('total_ap'))}",
+        f"Overdue AP >30d:  {num(ctx.kpis.get('overdue_ap'))}",
+    ]
+
+    if ctx.monthly_pnl:
+        lines += ["", "=== Monthly Revenue/Expense Trend (last 12m) ===",
+                  "Month        Revenue       Expense       Profit"]
+        for r in ctx.monthly_pnl[-12:]:
+            lines.append(
+                f"{r.get('year_month',''):<12} "
+                f"{num(r.get('total_revenue')):>12}  "
+                f"{num(r.get('total_expense')):>12}  "
+                f"{num(r.get('net_profit')):>12}"
+            )
+
+    if ctx.pnl_detail:
+        cat_totals = defaultdict(float)
+        for r in ctx.pnl_detail:
+            cat_totals[r.get("category", "Other")] += float(r.get("amount") or 0)
+        lines += ["", "=== P&L by Category ==="]
+        for cat, total in cat_totals.items():
+            lines.append(f"  {cat}: {num(total)}")
+
+    if ctx.ar_customers:
+        lines += ["", "=== Top AR Customers ==="]
+        for r in ctx.ar_customers[:10]:
+            lines.append(f"  {r.get('customer','')}: {num(r.get('total_outstanding'))}")
+
+    if ctx.ap_vendors:
+        lines += ["", "=== Top AP Vendors ==="]
+        for r in ctx.ap_vendors[:10]:
+            lines.append(f"  {r.get('vendor','')}: {num(r.get('total_outstanding'))}")
+
+    system_prompt = (
+        "You are an AI CFO assistant for SEE Institute Group. "
+        "You analyze financial data and give concise, actionable insights. "
+        "Use the numbers provided. Format monetary values with commas. "
+        "Be direct and professional. If something looks concerning, flag it.\n\n"
+        "Current Financial Data:\n" + "\n".join(lines)
+    )
+
+    client = ant.Anthropic(api_key=ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{"role": msg.role, "content": msg.content} for msg in req.messages],
+    )
+    return {"answer": response.content[0].text}
