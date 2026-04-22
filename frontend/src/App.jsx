@@ -8,68 +8,183 @@ import PnLDetail   from './components/PnLDetail'
 import BalanceSheet from './components/BalanceSheet'
 
 const COMPANIES   = [
+  { id: 'all',       name: 'All Companies' },
   { id: 'ogh-live',  name: 'OGH Live' },
   { id: '77asia',    name: '77 Asia' },
   { id: 'seeenviro', name: 'SEE Enviro' },
 ]
+const ALL_DBS = ['ogh-live', '77asia', 'seeenviro']
+
+function mergeKpis(list) {
+  const sum = (k) => list.reduce((a, x) => a + (Number(x?.[k]) || 0), 0)
+  const rev  = sum('month_revenue')
+  const exp  = sum('month_expense')
+  const profit = rev - exp
+  const ytdRev  = sum('ytd_revenue')
+  const ytdExp  = sum('ytd_expense')
+  const ytdProfit = ytdRev - ytdExp
+  return {
+    month_revenue: rev,
+    month_expense: exp,
+    month_profit:  profit,
+    month_margin:  rev ? ((profit / rev) * 100).toFixed(1) : '0.0',
+    ytd_revenue:   ytdRev,
+    ytd_expense:   ytdExp,
+    ytd_profit:    ytdProfit,
+    ytd_margin:    ytdRev ? ((ytdProfit / ytdRev) * 100).toFixed(1) : '0.0',
+    total_ar:      sum('total_ar'),
+    total_ap:      sum('total_ap'),
+    overdue_ar:    sum('overdue_ar'),
+    overdue_ap:    sum('overdue_ap'),
+  }
+}
+
+function mergeMonthlyPnl(lists) {
+  const map = {}
+  lists.flat().forEach(row => {
+    const key = row.month
+    if (!map[key]) map[key] = { ...row, revenue: 0, expense: 0, profit: 0 }
+    map[key].revenue += Number(row.revenue) || 0
+    map[key].expense += Number(row.expense) || 0
+    map[key].profit  += Number(row.profit)  || 0
+  })
+  return Object.values(map).sort((a, b) => a.month < b.month ? -1 : 1)
+}
+
+function mergeAging(list) {
+  const sum = (k) => list.reduce((a, x) => a + (Number(x?.[k]) || 0), 0)
+  return {
+    current_bucket:  sum('current_bucket'),
+    bucket_1_30:     sum('bucket_1_30'),
+    bucket_31_60:    sum('bucket_31_60'),
+    bucket_61_90:    sum('bucket_61_90'),
+    bucket_over_90:  sum('bucket_over_90'),
+  }
+}
+
+function mergeTableRows(lists, nameKey) {
+  const map = {}
+  lists.flat().forEach(row => {
+    const key = row[nameKey]
+    if (!map[key]) map[key] = { ...row, total: 0 }
+    map[key].total += Number(row.total) || 0
+  })
+  return Object.values(map).sort((a, b) => b.total - a.total)
+}
+
+function mergePnlDetail(lists) {
+  const map = {}
+  lists.flat().forEach(row => {
+    const key = `${row.account_code}|${row.account_name}`
+    if (!map[key]) map[key] = { ...row, balance: 0 }
+    map[key].balance += Number(row.balance) || 0
+  })
+  return Object.values(map)
+}
+
+function mergeBalanceSheet(lists) {
+  const map = {}
+  lists.flat().forEach(row => {
+    const key = `${row.account_type}|${row.account_code}|${row.account_name}`
+    if (!map[key]) map[key] = { ...row, balance: 0 }
+    map[key].balance += Number(row.balance) || 0
+  })
+  return Object.values(map)
+}
 const INTERVALS   = [{ v: 30, l: '30 sec' }, { v: 60, l: '1 min' }, { v: 300, l: '5 min' }, { v: 900, l: '15 min' }]
 const DETAIL_TABS = ['P&L Detail', 'Balance Sheet']
 
 const now = new Date()
 
 export default function App() {
-  const [db,           setDb]           = useState('ogh-live')
-  const [year,         setYear]         = useState(now.getFullYear())
-  const [month,        setMonth]        = useState(now.getMonth() + 1)
-  const [kpis,         setKpis]         = useState(null)
-  const [monthlyPnl,   setMonthlyPnl]   = useState([])
-  const [arAging,      setArAging]      = useState(null)
-  const [apAging,      setApAging]      = useState(null)
-  const [arCustomers,  setArCustomers]  = useState([])
-  const [apVendors,    setApVendors]    = useState([])
-  const [pnlDetail,    setPnlDetail]    = useState([])
-  const [pnlPeriod,    setPnlPeriod]    = useState(null)
-  const [balanceSheet, setBalanceSheet] = useState([])
-  const [detailTab,    setDetailTab]    = useState('P&L Detail')
-  const [loading,      setLoading]      = useState(false)
-  const [error,        setError]        = useState(null)
-  const [autoRefresh,  setAutoRefresh]  = useState(true)
-  const [interval,     setInterval_]    = useState(300)
-  const [lastRefreshed,setLastRefreshed]= useState(null)
+  const [db,            setDb]            = useState('ogh-live')
+  const [subCompanies,  setSubCompanies]  = useState([])
+  const [companyId,     setCompanyId]     = useState(null)
+  const [year,          setYear]          = useState(now.getFullYear())
+  const [month,         setMonth]         = useState(now.getMonth() + 1)
+  const [kpis,          setKpis]          = useState(null)
+  const [monthlyPnl,    setMonthlyPnl]    = useState([])
+  const [arAging,       setArAging]       = useState(null)
+  const [apAging,       setApAging]       = useState(null)
+  const [arCustomers,   setArCustomers]   = useState([])
+  const [apVendors,     setApVendors]     = useState([])
+  const [pnlDetail,     setPnlDetail]     = useState([])
+  const [pnlPeriod,     setPnlPeriod]     = useState(null)
+  const [balanceSheet,  setBalanceSheet]  = useState([])
+  const [detailTab,     setDetailTab]     = useState('P&L Detail')
+  const [loading,       setLoading]       = useState(false)
+  const [error,         setError]         = useState(null)
+  const [autoRefresh,   setAutoRefresh]   = useState(true)
+  const [interval,      setInterval_]     = useState(300)
+  const [lastRefreshed, setLastRefreshed] = useState(null)
   const timerRef = useRef(null)
+
+  // load sub-companies when db changes (skip for 'all')
+  useEffect(() => {
+    if (db === 'all') { setSubCompanies([]); setCompanyId(null); return }
+    api.subCompanies(db).then(res => {
+      const list = res.data || []
+      setSubCompanies(list.length > 1 ? list : [])
+      setCompanyId(null)
+    }).catch(() => { setSubCompanies([]); setCompanyId(null) })
+  }, [db])
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const [
-        kpisData, pnlData, arA, apA, arC, apV, pnlD, bs,
-      ] = await Promise.all([
-        api.kpis(db, year, month),
-        api.monthlyPnl(db),
-        api.arAging(db),
-        api.apAging(db),
-        api.arCustomers(db),
-        api.apVendors(db),
-        api.pnlDetail(db, year, month),
-        api.balanceSheet(db),
-      ])
-      setKpis(kpisData)
-      setMonthlyPnl(pnlData.data || [])
-      setArAging(arA)
-      setApAging(apA)
-      setArCustomers(arC.data || [])
-      setApVendors(apV.data || [])
-      setPnlDetail(pnlD.data || [])
-      setPnlPeriod(pnlD.period || null)
-      setBalanceSheet(bs.data || [])
+      if (db === 'all') {
+        const results = await Promise.all(
+          ALL_DBS.map(d => Promise.all([
+            api.kpis(d, year, month, null),
+            api.monthlyPnl(d, null),
+            api.arAging(d, null),
+            api.apAging(d, null),
+            api.arCustomers(d, null),
+            api.apVendors(d, null),
+            api.pnlDetail(d, year, month, null),
+            api.balanceSheet(d, null),
+          ]))
+        )
+        setKpis(mergeKpis(results.map(r => r[0])))
+        setMonthlyPnl(mergeMonthlyPnl(results.map(r => r[1].data || [])))
+        setArAging(mergeAging(results.map(r => r[2])))
+        setApAging(mergeAging(results.map(r => r[3])))
+        setArCustomers(mergeTableRows(results.map(r => r[4].data || []), 'customer'))
+        setApVendors(mergeTableRows(results.map(r => r[5].data || []), 'vendor'))
+        setPnlDetail(mergePnlDetail(results.map(r => r[6].data || [])))
+        setPnlPeriod(results[0][6].period || null)
+        setBalanceSheet(mergeBalanceSheet(results.map(r => r[7].data || [])))
+      } else {
+        const [
+          kpisData, pnlData, arA, apA, arC, apV, pnlD, bs,
+        ] = await Promise.all([
+          api.kpis(db, year, month, companyId),
+          api.monthlyPnl(db, companyId),
+          api.arAging(db, companyId),
+          api.apAging(db, companyId),
+          api.arCustomers(db, companyId),
+          api.apVendors(db, companyId),
+          api.pnlDetail(db, year, month, companyId),
+          api.balanceSheet(db, companyId),
+        ])
+        setKpis(kpisData)
+        setMonthlyPnl(pnlData.data || [])
+        setArAging(arA)
+        setApAging(apA)
+        setArCustomers(arC.data || [])
+        setApVendors(apV.data || [])
+        setPnlDetail(pnlD.data || [])
+        setPnlPeriod(pnlD.period || null)
+        setBalanceSheet(bs.data || [])
+      }
       setLastRefreshed(new Date())
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }, [db, year, month])
+  }, [db, year, month, companyId])
 
   // initial + re-fetch when dependencies change
   useEffect(() => {
@@ -113,6 +228,21 @@ export default function App() {
               </button>
             ))}
           </div>
+          {subCompanies.length > 0 && (
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <label style={{ fontSize: 12, color: '#8b949e' }}>Entity</label>
+              <select
+                value={companyId ?? ''}
+                onChange={e => setCompanyId(e.target.value ? Number(e.target.value) : null)}
+                style={{ fontSize: 12 }}
+              >
+                <option value="">All Entities</option>
+                {subCompanies.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </div>
 

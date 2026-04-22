@@ -1,3 +1,4 @@
+import logging
 import os
 import ssl
 import decimal
@@ -8,6 +9,9 @@ import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -32,10 +36,14 @@ def _ssl_ctx() -> ssl.SSLContext:
 async def _conn(db: str) -> asyncpg.Connection:
     if db not in VALID_DBS:
         raise HTTPException(400, f"Unknown database: {db}")
-    return await asyncpg.connect(
-        host=DB_HOST, port=DB_PORT, user=DB_USER,
-        password=DB_PASSWORD, database=db, ssl=_ssl_ctx(),
-    )
+    try:
+        return await asyncpg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER,
+            password=DB_PASSWORD, database=db, ssl=_ssl_ctx(),
+        )
+    except Exception as exc:
+        log.error("DB connect error [%s@%s:%s/%s]: %s", DB_USER, DB_HOST, DB_PORT, db, exc)
+        raise HTTPException(503, detail=f"Cannot connect to database '{db}': {exc}")
 
 
 def _clean(v: Any) -> Any:
@@ -53,6 +61,9 @@ async def fetch(db: str, sql: str, *args) -> list[dict]:
     try:
         rows = await conn.fetch(sql, *args)
         return [_row(r) for r in rows]
+    except Exception as exc:
+        log.error("fetch error [%s]: %s", db, exc, exc_info=True)
+        raise HTTPException(500, detail=str(exc))
     finally:
         await conn.close()
 
@@ -62,6 +73,9 @@ async def fetch_one(db: str, sql: str, *args) -> dict:
     try:
         row = await conn.fetchrow(sql, *args)
         return _row(row) if row else {}
+    except Exception as exc:
+        log.error("fetch_one error [%s]: %s", db, exc, exc_info=True)
+        raise HTTPException(500, detail=str(exc))
     finally:
         await conn.close()
 
@@ -83,6 +97,15 @@ async def companies():
 
 
 # ─────────────────────────────────────────────
+# /api/sub-companies
+# ─────────────────────────────────────────────
+@app.get("/api/sub-companies")
+async def sub_companies(db: str = Query("ogh-live")):
+    rows = await fetch(db, "SELECT id, name FROM res_company ORDER BY name")
+    return {"data": rows}
+
+
+# ─────────────────────────────────────────────
 # /api/kpis   – KPI summary cards
 # ─────────────────────────────────────────────
 @app.get("/api/kpis")
@@ -90,6 +113,7 @@ async def kpis(
     db: str = Query("ogh-live"),
     year: int = Query(None),
     month: int = Query(None),
+    company_id: int = Query(None),
 ):
     today = date.today()
     y = year or today.year
@@ -125,6 +149,7 @@ async def kpis(
               'income','income_other',
               'expense','expense_depreciation','expense_direct_cost')
           AND EXTRACT(YEAR FROM am.date)::int = $2
+          AND ($3::int IS NULL OR am.company_id = $3)
     """
     ar_sql = """
         SELECT
@@ -135,6 +160,7 @@ async def kpis(
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
           AND am.amount_residual > 0
+          AND ($1::int IS NULL OR am.company_id = $1)
     """
     ap_sql = """
         SELECT
@@ -145,10 +171,11 @@ async def kpis(
         WHERE am.state = 'posted'
           AND am.move_type IN ('in_invoice','in_refund')
           AND am.amount_residual > 0
+          AND ($1::int IS NULL OR am.company_id = $1)
     """
-    pnl = await fetch_one(db, pnl_sql, m, y)
-    ar  = await fetch_one(db, ar_sql)
-    ap  = await fetch_one(db, ap_sql)
+    pnl = await fetch_one(db, pnl_sql, m, y, company_id)
+    ar  = await fetch_one(db, ar_sql, company_id)
+    ap  = await fetch_one(db, ap_sql, company_id)
 
     mr, me = float(pnl.get("month_revenue") or 0), float(pnl.get("month_expense") or 0)
     yr, ye = float(pnl.get("ytd_revenue") or 0),   float(pnl.get("ytd_expense") or 0)
@@ -174,12 +201,12 @@ async def kpis(
 # /api/monthly-pnl   – Query 11
 # ─────────────────────────────────────────────
 @app.get("/api/monthly-pnl")
-async def monthly_pnl(db: str = Query("ogh-live")):
+async def monthly_pnl(db: str = Query("ogh-live"), company_id: int = Query(None)):
     sql = """
         SELECT
-            TO_CHAR(am.date, 'YYYY-MM')           AS year_month,
-            EXTRACT(YEAR  FROM am.date)::int       AS year,
-            EXTRACT(MONTH FROM am.date)::int       AS month,
+            TO_CHAR(am.date, 'YYYY-MM')            AS year_month,
+            EXTRACT(YEAR  FROM am.date)::int        AS year,
+            EXTRACT(MONTH FROM am.date)::int        AS month,
             COALESCE(SUM(CASE WHEN aa.account_type IN ('income','income_other')
                 THEN aml.credit - aml.debit ELSE 0 END), 0) AS total_revenue,
             COALESCE(SUM(CASE WHEN aa.account_type IN (
@@ -189,15 +216,18 @@ async def monthly_pnl(db: str = Query("ogh-live")):
         JOIN account_move    am ON am.id = aml.move_id
         JOIN account_account aa ON aa.id = aml.account_id
         WHERE am.state = 'posted'
+          AND am.date IS NOT NULL
           AND aa.account_type IN (
               'income','income_other',
               'expense','expense_depreciation','expense_direct_cost')
-          AND am.date >= (CURRENT_DATE - INTERVAL '12 months')
-        GROUP BY TO_CHAR(am.date,'YYYY-MM'),
-                 EXTRACT(YEAR FROM am.date), EXTRACT(MONTH FROM am.date)
+          AND am.date >= (CURRENT_DATE - INTERVAL '12 months')::date
+          AND ($1::int IS NULL OR am.company_id = $1)
+        GROUP BY TO_CHAR(am.date, 'YYYY-MM'),
+                 EXTRACT(YEAR  FROM am.date)::int,
+                 EXTRACT(MONTH FROM am.date)::int
         ORDER BY year_month
     """
-    rows = await fetch(db, sql)
+    rows = await fetch(db, sql, company_id)
     return {"data": [
         {**r,
          "total_revenue": float(r["total_revenue"] or 0),
@@ -211,7 +241,7 @@ async def monthly_pnl(db: str = Query("ogh-live")):
 # /api/ar-aging   – Query 9 (summary)
 # ─────────────────────────────────────────────
 @app.get("/api/ar-aging")
-async def ar_aging(db: str = Query("ogh-live")):
+async def ar_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
     sql = """
         SELECT
             COALESCE(SUM(CASE WHEN am.invoice_date_due >= CURRENT_DATE
@@ -230,8 +260,9 @@ async def ar_aging(db: str = Query("ogh-live")):
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
           AND am.amount_residual > 0
+          AND ($1::int IS NULL OR am.company_id = $1)
     """
-    row = await fetch_one(db, sql)
+    row = await fetch_one(db, sql, company_id)
     return {k: float(v or 0) for k, v in row.items()}
 
 
@@ -239,7 +270,7 @@ async def ar_aging(db: str = Query("ogh-live")):
 # /api/ap-aging   – Query 10 (summary)
 # ─────────────────────────────────────────────
 @app.get("/api/ap-aging")
-async def ap_aging(db: str = Query("ogh-live")):
+async def ap_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
     sql = """
         SELECT
             COALESCE(SUM(CASE WHEN am.invoice_date_due >= CURRENT_DATE
@@ -258,8 +289,9 @@ async def ap_aging(db: str = Query("ogh-live")):
         WHERE am.state = 'posted'
           AND am.move_type IN ('in_invoice','in_refund')
           AND am.amount_residual > 0
+          AND ($1::int IS NULL OR am.company_id = $1)
     """
-    row = await fetch_one(db, sql)
+    row = await fetch_one(db, sql, company_id)
     return {k: float(v or 0) for k, v in row.items()}
 
 
@@ -267,7 +299,7 @@ async def ap_aging(db: str = Query("ogh-live")):
 # /api/ar-customers  – Query 9 (detail)
 # ─────────────────────────────────────────────
 @app.get("/api/ar-customers")
-async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25)):
+async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25), company_id: int = Query(None)):
     sql = """
         SELECT
             rp.name AS customer,
@@ -288,11 +320,12 @@ async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25)):
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
           AND am.amount_residual > 0
+          AND ($2::int IS NULL OR am.company_id = $2)
         GROUP BY rp.name
         ORDER BY total_outstanding DESC
         LIMIT $1
     """
-    rows = await fetch(db, sql, limit)
+    rows = await fetch(db, sql, limit, company_id)
     return {"data": rows}
 
 
@@ -300,7 +333,7 @@ async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25)):
 # /api/ap-vendors  – Query 10 (detail)
 # ─────────────────────────────────────────────
 @app.get("/api/ap-vendors")
-async def ap_vendors(db: str = Query("ogh-live"), limit: int = Query(25)):
+async def ap_vendors(db: str = Query("ogh-live"), limit: int = Query(25), company_id: int = Query(None)):
     sql = """
         SELECT
             rp.name AS vendor,
@@ -321,11 +354,12 @@ async def ap_vendors(db: str = Query("ogh-live"), limit: int = Query(25)):
         WHERE am.state = 'posted'
           AND am.move_type IN ('in_invoice','in_refund')
           AND am.amount_residual > 0
+          AND ($2::int IS NULL OR am.company_id = $2)
         GROUP BY rp.name
         ORDER BY total_outstanding DESC
         LIMIT $1
     """
-    rows = await fetch(db, sql, limit)
+    rows = await fetch(db, sql, limit, company_id)
     return {"data": rows}
 
 
@@ -337,6 +371,7 @@ async def pnl_detail(
     db: str = Query("ogh-live"),
     year: int = Query(None),
     month: int = Query(None),
+    company_id: int = Query(None),
 ):
     today = date.today()
     y = year or today.year
@@ -366,12 +401,13 @@ async def pnl_detail(
               'expense','expense_depreciation','expense_direct_cost')
           AND EXTRACT(YEAR  FROM am.date)::int = $1
           AND EXTRACT(MONTH FROM am.date)::int = $2
+          AND ($3::int IS NULL OR am.company_id = $3)
         GROUP BY aa.account_type,
                  aa.code_store->>(aml.company_id::text),
                  aa.name->>'en_US'
         ORDER BY category, account_code
     """
-    rows = await fetch(db, sql, y, m)
+    rows = await fetch(db, sql, y, m, company_id)
     return {"data": rows, "period": {"year": y, "month": m}}
 
 
@@ -379,7 +415,7 @@ async def pnl_detail(
 # /api/balance-sheet  – Query 4
 # ─────────────────────────────────────────────
 @app.get("/api/balance-sheet")
-async def balance_sheet(db: str = Query("ogh-live")):
+async def balance_sheet(db: str = Query("ogh-live"), company_id: int = Query(None)):
     sql = """
         SELECT
             CASE
@@ -401,12 +437,13 @@ async def balance_sheet(db: str = Query("ogh-live")):
               'asset_non_current','asset_prepayments','asset_fixed',
               'liability_payable','liability_current','liability_non_current',
               'equity','equity_unaffected')
+          AND ($1::int IS NULL OR am.company_id = $1)
         GROUP BY aa.account_type,
                  aa.code_store->>(aml.company_id::text),
                  aa.name->>'en_US'
         ORDER BY category, account_code
     """
-    rows = await fetch(db, sql)
+    rows = await fetch(db, sql, company_id)
     return {"data": rows}
 
 
