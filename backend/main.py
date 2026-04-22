@@ -574,6 +574,47 @@ async def invoices(db: str = Query("ogh-live"), limit: int = Query(30)):
 
 
 # ─────────────────────────────────────────────
+# /api/yearly-summary
+# ─────────────────────────────────────────────
+@app.get("/api/yearly-summary")
+async def yearly_summary(db: str = Query("ogh-live"), company_id: int = Query(None)):
+    sql = """
+        SELECT
+            EXTRACT(YEAR FROM am.date)::int AS year,
+            COALESCE(SUM(CASE WHEN aa.account_type IN ('income','income_other')
+                THEN aml.credit - aml.debit ELSE 0 END), 0) AS total_revenue,
+            COALESCE(SUM(CASE WHEN aa.account_type IN (
+                'expense','expense_depreciation','expense_direct_cost')
+                THEN aml.debit - aml.credit ELSE 0 END), 0) AS total_expense
+        FROM account_move_line aml
+        JOIN account_move    am ON am.id = aml.move_id
+        JOIN account_account aa ON aa.id = aml.account_id
+        WHERE am.state = 'posted'
+          AND am.date IS NOT NULL
+          AND aa.account_type IN (
+              'income','income_other',
+              'expense','expense_depreciation','expense_direct_cost')
+          AND ($1::int IS NULL OR am.company_id = $1)
+        GROUP BY EXTRACT(YEAR FROM am.date)::int
+        ORDER BY year
+    """
+    rows = await fetch(db, sql, company_id)
+    result = []
+    for r in rows:
+        rev  = float(r["total_revenue"] or 0)
+        exp  = float(r["total_expense"] or 0)
+        profit = rev - exp
+        result.append({
+            "year":          r["year"],
+            "total_revenue": rev,
+            "total_expense": exp,
+            "net_profit":    profit,
+            "margin":        round(profit / rev * 100, 1) if rev else 0,
+        })
+    return {"data": result}
+
+
+# ─────────────────────────────────────────────
 # /api/export/excel
 # ─────────────────────────────────────────────
 @app.get("/api/export/excel")

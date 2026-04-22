@@ -6,7 +6,8 @@ import AgingDonut   from './components/AgingDonut'
 import AgingTable   from './components/AgingTable'
 import PnLDetail    from './components/PnLDetail'
 import BalanceSheet from './components/BalanceSheet'
-import ChatPanel    from './components/ChatPanel'
+import ChatPanel      from './components/ChatPanel'
+import YearlySummary from './components/YearlySummary'
 
 const COMPANIES   = [
   { id: 'all',       name: 'All Companies' },
@@ -83,6 +84,23 @@ function mergePnlDetail(lists) {
   return Object.values(map)
 }
 
+function mergeYearlySummary(lists) {
+  const map = {}
+  lists.flat().forEach(row => {
+    const key = row.year
+    if (!map[key]) map[key] = { year: key, total_revenue: 0, total_expense: 0 }
+    map[key].total_revenue += Number(row.total_revenue) || 0
+    map[key].total_expense += Number(row.total_expense) || 0
+  })
+  return Object.values(map)
+    .sort((a, b) => a.year - b.year)
+    .map(r => ({
+      ...r,
+      net_profit: r.total_revenue - r.total_expense,
+      margin: r.total_revenue ? +((r.total_revenue - r.total_expense) / r.total_revenue * 100).toFixed(1) : 0,
+    }))
+}
+
 function mergeBalanceSheet(lists) {
   const map = {}
   lists.flat().forEach(row => {
@@ -93,7 +111,7 @@ function mergeBalanceSheet(lists) {
   return Object.values(map)
 }
 const INTERVALS   = [{ v: 30, l: '30 sec' }, { v: 60, l: '1 min' }, { v: 300, l: '5 min' }, { v: 900, l: '15 min' }]
-const DETAIL_TABS = ['P&L Detail', 'Balance Sheet']
+const DETAIL_TABS = ['P&L Detail', 'Balance Sheet', 'Year Summary']
 
 const now = new Date()
 
@@ -109,6 +127,7 @@ export default function App() {
   const [apAging,       setApAging]       = useState(null)
   const [arCustomers,   setArCustomers]   = useState([])
   const [apVendors,     setApVendors]     = useState([])
+  const [yearlySummary, setYearlySummary] = useState([])
   const [pnlDetail,     setPnlDetail]     = useState([])
   const [pnlPeriod,     setPnlPeriod]     = useState(null)
   const [balanceSheet,  setBalanceSheet]  = useState([])
@@ -153,6 +172,7 @@ export default function App() {
             api.apVendors(d, null),
             api.pnlDetail(d, year, month, null),
             api.balanceSheet(d, null),
+            api.yearlySummary(d, null),
           ]))
         )
         setKpis(mergeKpis(results.map(r => r[0])))
@@ -164,9 +184,10 @@ export default function App() {
         setPnlDetail(mergePnlDetail(results.map(r => r[6].data || [])))
         setPnlPeriod(results[0][6].period || null)
         setBalanceSheet(mergeBalanceSheet(results.map(r => r[7].data || [])))
+        setYearlySummary(mergeYearlySummary(results.map(r => r[8].data || [])))
       } else {
         const [
-          kpisData, pnlData, arA, apA, arC, apV, pnlD, bs,
+          kpisData, pnlData, arA, apA, arC, apV, pnlD, bs, yrly,
         ] = await Promise.all([
           api.kpis(db, year, month, companyId),
           api.monthlyPnl(db, companyId),
@@ -176,6 +197,7 @@ export default function App() {
           api.apVendors(db, companyId),
           api.pnlDetail(db, year, month, companyId),
           api.balanceSheet(db, companyId),
+          api.yearlySummary(db, companyId),
         ])
         setKpis(kpisData)
         setMonthlyPnl(pnlData.data || [])
@@ -186,6 +208,7 @@ export default function App() {
         setPnlDetail(pnlD.data || [])
         setPnlPeriod(pnlD.period || null)
         setBalanceSheet(bs.data || [])
+        setYearlySummary(yrly.data || [])
       }
       setLastRefreshed(new Date())
     } catch (err) {
@@ -380,6 +403,9 @@ export default function App() {
       )}
       {detailTab === 'Balance Sheet' && (
         <BalanceSheet data={balanceSheet} />
+      )}
+      {detailTab === 'Year Summary' && (
+        <YearlySummary data={yearlySummary} />
       )}
 
       {/* ── AI Chat ── */}

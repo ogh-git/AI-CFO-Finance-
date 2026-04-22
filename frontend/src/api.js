@@ -8,18 +8,19 @@ const get = (path) => fetch(BASE + path).then(r => {
 const cid = (company_id) => company_id ? `&company_id=${company_id}` : ''
 
 export const api = {
-  companies:    ()                              => get('/companies'),
-  subCompanies: (db)                            => get(`/sub-companies?db=${db}`),
-  kpis:         (db, year, month, company_id)   => get(`/kpis?db=${db}&year=${year}&month=${month}${cid(company_id)}`),
-  monthlyPnl:   (db, company_id)               => get(`/monthly-pnl?db=${db}${cid(company_id)}`),
-  arAging:      (db, company_id)               => get(`/ar-aging?db=${db}${cid(company_id)}`),
-  apAging:      (db, company_id)               => get(`/ap-aging?db=${db}${cid(company_id)}`),
-  arCustomers:  (db, company_id)               => get(`/ar-customers?db=${db}&limit=25${cid(company_id)}`),
-  apVendors:    (db, company_id)               => get(`/ap-vendors?db=${db}&limit=25${cid(company_id)}`),
-  pnlDetail:    (db, year, month, company_id)   => get(`/pnl-detail?db=${db}&year=${year}&month=${month}${cid(company_id)}`),
-  balanceSheet: (db, company_id)               => get(`/balance-sheet?db=${db}${cid(company_id)}`),
-  invoices:     (db)                            => get(`/invoices?db=${db}&limit=30`),
-  cash:         (db)                            => get(`/cash?db=${db}&limit=30`),
+  companies:     ()                              => get('/companies'),
+  subCompanies:  (db)                            => get(`/sub-companies?db=${db}`),
+  kpis:          (db, year, month, company_id)   => get(`/kpis?db=${db}&year=${year}&month=${month}${cid(company_id)}`),
+  monthlyPnl:    (db, company_id)               => get(`/monthly-pnl?db=${db}${cid(company_id)}`),
+  yearlySummary: (db, company_id)               => get(`/yearly-summary?db=${db}${cid(company_id)}`),
+  arAging:       (db, company_id)               => get(`/ar-aging?db=${db}${cid(company_id)}`),
+  apAging:       (db, company_id)               => get(`/ap-aging?db=${db}${cid(company_id)}`),
+  arCustomers:   (db, company_id)               => get(`/ar-customers?db=${db}&limit=25${cid(company_id)}`),
+  apVendors:     (db, company_id)               => get(`/ap-vendors?db=${db}&limit=25${cid(company_id)}`),
+  pnlDetail:     (db, year, month, company_id)   => get(`/pnl-detail?db=${db}&year=${year}&month=${month}${cid(company_id)}`),
+  balanceSheet:  (db, company_id)               => get(`/balance-sheet?db=${db}${cid(company_id)}`),
+  invoices:      (db)                            => get(`/invoices?db=${db}&limit=30`),
+  cash:          (db)                            => get(`/cash?db=${db}&limit=30`),
 }
 
 export const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
