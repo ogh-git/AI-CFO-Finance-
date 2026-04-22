@@ -1,7 +1,7 @@
 import os
 import ssl
 import decimal
-from datetime import date
+import datetime
 from typing import Any
 
 import asyncpg
@@ -41,6 +41,10 @@ async def _conn(db: str) -> asyncpg.Connection:
 def _clean(v: Any) -> Any:
     if isinstance(v, decimal.Decimal):
         return float(v)
+    if isinstance(v, (datetime.date, datetime.datetime)):
+        return v.isoformat()
+    if isinstance(v, datetime.timedelta):
+        return v.days
     return v
 
 
@@ -72,6 +76,18 @@ async def fetch_one(db: str, sql: str, *args) -> dict:
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+# ─────────────────────────────────────────────
+# /api/debug  – test DB connectivity
+# ─────────────────────────────────────────────
+@app.get("/api/debug")
+async def debug(db: str = "ogh-live"):
+    try:
+        result = await fetch_one(db, "SELECT current_database() AS db, now() AS ts, version() AS ver")
+        return {"status": "connected", "db": db, "result": result}
+    except Exception as e:
+        return {"status": "error", "db": db, "error": str(e)}
 
 
 # ─────────────────────────────────────────────
