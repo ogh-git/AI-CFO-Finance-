@@ -1,9 +1,13 @@
+import { useState } from 'react'
 import { fmt } from '../api'
 
-const ORDER   = ['Asset', 'Liability', 'Equity', 'Retained Earnings']
-const COLORS  = { Asset: '#3fb950', Liability: '#f85149', Equity: '#58a6ff', 'Retained Earnings': '#bc8cff' }
+const ORDER  = ['Asset', 'Liability', 'Equity', 'Retained Earnings']
+const COLORS = { Asset: '#3fb950', Liability: '#f85149', Equity: '#58a6ff', 'Retained Earnings': '#bc8cff' }
 
 export default function BalanceSheet({ data }) {
+  const [collapsed, setCollapsed] = useState({})
+  const toggle = (cat) => setCollapsed(prev => ({ ...prev, [cat]: !prev[cat] }))
+
   const rows   = data || []
   const groups = ORDER.reduce((acc, cat) => {
     acc[cat] = rows.filter(r => r.category === cat)
@@ -39,28 +43,41 @@ export default function BalanceSheet({ data }) {
       {ORDER.map(cat => {
         const catRows = groups[cat]
         if (!catRows?.length) return null
-        const subtotal = catRows.reduce((a, r) => a + (r.net_balance || 0), 0)
+        const subtotal    = catRows.reduce((a, r) => a + (r.net_balance || 0), 0)
+        const isCollapsed = !!collapsed[cat]
         return (
           <div key={cat} style={{ marginBottom: 14 }}>
-            <div className="pnl-group-header" style={{ color: COLORS[cat] }}>{cat}</div>
-            <div className="table-wrap">
-              <table>
-                <tbody>
-                  {catRows.map((r, i) => (
-                    <tr key={i}>
-                      <td style={{ color: '#8b949e', width: 100, minWidth: 80 }}>{r.account_code}</td>
-                      <td style={{ textAlign: 'left' }}>{r.account_name}</td>
-                      <td style={{ width: 140, fontWeight: 500 }}>{fmt(r.net_balance)}</td>
-                    </tr>
-                  ))}
-                  <tr className="pnl-total-row">
-                    <td></td>
-                    <td style={{ textAlign: 'left', fontWeight: 700, color: COLORS[cat] }}>Total {cat}</td>
-                    <td style={{ fontWeight: 700, color: COLORS[cat] }}>{fmt(subtotal)}</td>
-                  </tr>
-                </tbody>
-              </table>
+            <div
+              className="pnl-group-header pnl-group-toggle"
+              style={{ color: COLORS[cat] }}
+              onClick={() => toggle(cat)}
+            >
+              <span>{cat}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>{fmt(subtotal)}</span>
+                <span className={`pnl-chevron${isCollapsed ? ' collapsed' : ''}`}>▾</span>
+              </span>
             </div>
+            {!isCollapsed && (
+              <div className="table-wrap">
+                <table>
+                  <tbody>
+                    {catRows.map((r, i) => (
+                      <tr key={i}>
+                        <td style={{ color: '#8b949e', width: 100, minWidth: 80 }}>{r.account_code}</td>
+                        <td style={{ textAlign: 'left' }}>{r.account_name}</td>
+                        <td style={{ width: 140, fontWeight: 500 }}>{fmt(r.net_balance)}</td>
+                      </tr>
+                    ))}
+                    <tr className="pnl-total-row">
+                      <td></td>
+                      <td style={{ textAlign: 'left', fontWeight: 700, color: COLORS[cat] }}>Total {cat}</td>
+                      <td style={{ fontWeight: 700, color: COLORS[cat] }}>{fmt(subtotal)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )
       })}
