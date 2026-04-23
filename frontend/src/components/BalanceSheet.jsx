@@ -5,7 +5,7 @@ const ORDER  = ['Asset', 'Liability', 'Equity', 'Retained Earnings']
 const COLORS = { Asset: '#3fb950', Liability: '#f85149', Equity: '#58a6ff', 'Retained Earnings': '#bc8cff' }
 
 export default function BalanceSheet({ data }) {
-  const [collapsed, setCollapsed] = useState({})
+  const [collapsed, setCollapsed] = useState(() => Object.fromEntries(ORDER.map(c => [c, true])))
   const toggle = (cat) => setCollapsed(prev => ({ ...prev, [cat]: !prev[cat] }))
 
   const rows   = data || []

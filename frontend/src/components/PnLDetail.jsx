@@ -5,7 +5,7 @@ const ORDER = ['Revenue', 'Cost of Sales', 'Operating Expense', 'Depreciation']
 const COLOR  = { Revenue: '#3fb950', 'Cost of Sales': '#f85149', 'Operating Expense': '#d29922', Depreciation: '#8b949e' }
 
 export default function PnLDetail({ data, period }) {
-  const [collapsed, setCollapsed] = useState({})
+  const [collapsed, setCollapsed] = useState(() => Object.fromEntries(ORDER.map(c => [c, true])))
   const toggle = (cat) => setCollapsed(prev => ({ ...prev, [cat]: !prev[cat] }))
 
   const rows   = data || []
