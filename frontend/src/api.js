@@ -2,13 +2,28 @@ const BASE = '/api'
 
 const tok = () => localStorage.getItem('cfo_token') || ''
 
-const get = (path) => fetch(BASE + path, {
-  headers: { Authorization: `Bearer ${tok()}` }
-}).then(r => {
-  if (r.status === 401) { localStorage.removeItem('cfo_token'); window.location.reload(); return }
-  if (!r.ok) throw new Error(`API error ${r.status}: ${path}`)
-  return r.json()
-})
+// ── Response cache (45 s TTL) ─────────────────────────────────────────────────
+const _cache  = new Map()
+const CACHE_MS = 45_000
+
+export const clearApiCache = () => _cache.clear()
+
+const get = (path) => {
+  const now = Date.now()
+  const hit = _cache.get(path)
+  if (hit && now - hit.t < CACHE_MS) return Promise.resolve(hit.v)
+
+  return fetch(BASE + path, {
+    headers: { Authorization: `Bearer ${tok()}` }
+  }).then(r => {
+    if (r.status === 401) { localStorage.removeItem('cfo_token'); window.location.reload(); return }
+    if (!r.ok) throw new Error(`API error ${r.status}: ${path}`)
+    return r.json()
+  }).then(v => {
+    _cache.set(path, { v, t: Date.now() })
+    return v
+  })
+}
 
 const post = (path, body) => fetch(BASE + path, {
   method: 'POST',

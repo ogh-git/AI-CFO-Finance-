@@ -342,6 +342,22 @@ tbody td:first-child { text-align: left; color: var(--text); font-weight: 500; m
 .chat-send:hover { background: #388bfd; }
 .chat-send.disabled { background: var(--border); cursor: not-allowed; }
 
+/* ── Loading bar ─────────────────────────────────── */
+.loading-bar {
+  position: fixed; top: 0; left: 240px; right: 0; height: 3px; z-index: 600;
+  overflow: hidden;
+  background: transparent;
+}
+.loading-bar::after {
+  content: ''; display: block; height: 100%; width: 45%;
+  background: linear-gradient(90deg, transparent, var(--primary), #388bfd, transparent);
+  animation: loadslide 1s ease-in-out infinite;
+}
+@keyframes loadslide {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(340%);  }
+}
+
 /* ── Company / entity bar (top of main content) ─── */
 .company-bar {
   padding: 20px 0 14px;

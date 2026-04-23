@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { api, fmt, MONTHS } from './api'
+import { api, fmt, MONTHS, clearApiCache } from './api'
 import Login         from './pages/Login'
 import Sidebar       from './components/Sidebar'
 import UserManager   from './components/UserManager'
@@ -267,7 +267,11 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDbsKey, selectedEntitiesKey, year, month])
 
-  useEffect(() => { if (user) fetchAll() }, [fetchAll, user])
+  useEffect(() => {
+    if (!user) return
+    const t = setTimeout(fetchAll, 250)
+    return () => clearTimeout(t)
+  }, [fetchAll, user])
 
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current)
@@ -300,6 +304,8 @@ export default function App() {
         user={user}
         onLogout={handleLogout}
       />
+
+      {loading && <div className="loading-bar" />}
 
       <div className="main-content">
 
@@ -371,7 +377,7 @@ export default function App() {
                 {INTERVALS.map(i => <option key={i.v} value={i.v}>{i.l}</option>)}
               </select>
             )}
-            <button className="btn primary" onClick={fetchAll} disabled={loading}>
+            <button className="btn primary" onClick={() => { clearApiCache(); fetchAll() }} disabled={loading}>
               {loading ? 'Loading…' : '↻ Refresh'}
             </button>
             <div className="export-wrap">
@@ -398,6 +404,8 @@ export default function App() {
             ids={selectedEntities.length > 0 ? selectedEntities : null}
           />
         )}
+
+        <div style={{ transition: 'opacity 0.25s', opacity: loading ? 0.55 : 1 }}>
 
         {section === 'summary' && (
           <>
@@ -451,6 +459,8 @@ export default function App() {
             {detailTab === 'Year Summary'  && <YearlySummary data={yearlySummary} />}
           </>
         )}
+
+        </div>{/* end opacity wrapper */}
 
         <button className="chat-fab" onClick={() => setChatOpen(v => !v)} title="AI CFO Assistant">AI</button>
         <ChatPanel
