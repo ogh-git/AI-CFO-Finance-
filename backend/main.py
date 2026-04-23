@@ -1,18 +1,26 @@
 import io
 import logging
 import os
+import sqlite3
 import ssl
 import decimal
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, List, Optional
 
 import asyncpg
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+
+try:
+    from passlib.context import CryptContext
+    from jose import JWTError, jwt as jose_jwt
+    AUTH_OK = True
+except ImportError:
+    AUTH_OK = False
 
 # ── optional heavy deps ────────────────────────────────
 try:
@@ -46,6 +54,60 @@ log = logging.getLogger(__name__)
 
 load_dotenv()
 
+# ── Auth / Users ──────────────────────────────────────
+USERS_DB   = os.getenv("USERS_DB", "/app/data/users.db")
+JWT_SECRET = os.getenv("JWT_SECRET", "cfo-dashboard-secret-change-in-prod")
+JWT_ALG    = "HS256"
+JWT_HOURS  = 24
+pwd_ctx    = CryptContext(schemes=["bcrypt"], deprecated="auto") if AUTH_OK else None
+
+def _uconn():
+    os.makedirs(os.path.dirname(USERS_DB), exist_ok=True)
+    return sqlite3.connect(USERS_DB, check_same_thread=False)
+
+def _init_users():
+    c = _uconn()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT NOT NULL DEFAULT '',
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'viewer',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    c.commit()
+    if c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0 and AUTH_OK:
+        c.execute("INSERT INTO users (username,email,password_hash,role) VALUES (?,?,?,?)",
+                  ("admin","admin@example.com", pwd_ctx.hash("admin123"), "admin"))
+        c.commit()
+        log.info("Default admin created — username: admin  password: admin123  (change it!)")
+    c.close()
+
+def _make_token(uid: int, username: str, role: str) -> str:
+    payload = {"sub": str(uid), "username": username, "role": role,
+               "exp": datetime.utcnow() + timedelta(hours=JWT_HOURS)}
+    return jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+def _decode_token(token: str) -> dict:
+    return jose_jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+
+def _caller(request: Request) -> dict:
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    try:
+        return _decode_token(token)
+    except Exception:
+        raise HTTPException(401, "Invalid token")
+
+# ── company_ids helper ────────────────────────────────
+def parse_ids(s: Optional[str]) -> Optional[list]:
+    if not s: return None
+    try:
+        ids = [int(x.strip()) for x in s.split(',') if x.strip()]
+        return ids if ids else None
+    except (ValueError, AttributeError):
+        return None
+
 DB_HOST = os.getenv("DB_HOST", "ogh-live-pg.techleara.net")
 DB_PORT = int(os.getenv("DB_PORT", "22345"))
 DB_USER = os.getenv("DB_USER", "postgres")
@@ -55,6 +117,24 @@ DB_LABELS = {"ogh-live": "OGH Live", "77asia": "77 Asia", "seeenviro": "SEE Envi
 
 app = FastAPI(title="AI CFO Finance Dashboard API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.on_event("startup")
+def startup():
+    _init_users()
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    public = ("/api/auth/login", "/api/health")
+    if any(request.url.path.startswith(p) for p in public):
+        return await call_next(request)
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not token:
+        return JSONResponse({"detail": "Authentication required"}, status_code=401)
+    try:
+        _decode_token(token)
+    except Exception:
+        return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+    return await call_next(request)
 
 
 def _ssl_ctx() -> ssl.SSLContext:
@@ -120,6 +200,93 @@ async def health():
 
 
 # ─────────────────────────────────────────────
+# Auth endpoints
+# ─────────────────────────────────────────────
+class LoginReq(BaseModel):
+    username: str
+    password: str
+
+class CreateUserReq(BaseModel):
+    username: str
+    email: str = ""
+    password: str
+    role: str = "viewer"
+
+class UpdateUserReq(BaseModel):
+    email: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
+
+def _get_user(username: str):
+    c = _uconn()
+    row = c.execute("SELECT id,username,email,password_hash,role,is_active FROM users WHERE username=?",
+                    (username,)).fetchone()
+    c.close()
+    if not row: return None
+    return {"id":row[0],"username":row[1],"email":row[2],"password_hash":row[3],"role":row[4],"is_active":bool(row[5])}
+
+@app.post("/api/auth/login")
+async def auth_login(req: LoginReq):
+    if not AUTH_OK: raise HTTPException(501, "Auth libraries not installed")
+    user = _get_user(req.username)
+    if not user or not user["is_active"] or not pwd_ctx.verify(req.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid credentials")
+    token = _make_token(user["id"], user["username"], user["role"])
+    return {"token": token, "user": {k: user[k] for k in ("id","username","email","role")}}
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    return _caller(request)
+
+@app.get("/api/auth/users")
+async def auth_list_users(request: Request):
+    caller = _caller(request)
+    if caller.get("role") != "admin": raise HTTPException(403, "Admins only")
+    c = _uconn()
+    rows = c.execute("SELECT id,username,email,role,is_active,created_at FROM users ORDER BY id").fetchall()
+    c.close()
+    return {"data": [{"id":r[0],"username":r[1],"email":r[2],"role":r[3],"is_active":bool(r[4]),"created_at":r[5]} for r in rows]}
+
+@app.post("/api/auth/users")
+async def auth_create_user(req: CreateUserReq, request: Request):
+    caller = _caller(request)
+    if caller.get("role") != "admin": raise HTTPException(403, "Admins only")
+    if not AUTH_OK: raise HTTPException(501, "Auth libraries not installed")
+    try:
+        c = _uconn()
+        c.execute("INSERT INTO users (username,email,password_hash,role) VALUES (?,?,?,?)",
+                  (req.username, req.email, pwd_ctx.hash(req.password), req.role))
+        c.commit()
+        uid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        c.close()
+        return {"id": uid, "username": req.username, "email": req.email, "role": req.role, "is_active": True}
+    except sqlite3.IntegrityError:
+        raise HTTPException(400, f"Username '{req.username}' already exists")
+
+@app.patch("/api/auth/users/{uid}")
+async def auth_update_user(uid: int, req: UpdateUserReq, request: Request):
+    caller = _caller(request)
+    if caller.get("role") != "admin": raise HTTPException(403, "Admins only")
+    c = _uconn()
+    if req.email    is not None: c.execute("UPDATE users SET email=? WHERE id=?",      (req.email, uid))
+    if req.role     is not None: c.execute("UPDATE users SET role=? WHERE id=?",       (req.role, uid))
+    if req.is_active is not None: c.execute("UPDATE users SET is_active=? WHERE id=?", (1 if req.is_active else 0, uid))
+    if req.password is not None and AUTH_OK:
+        c.execute("UPDATE users SET password_hash=? WHERE id=?", (pwd_ctx.hash(req.password), uid))
+    c.commit(); c.close()
+    return {"ok": True}
+
+@app.delete("/api/auth/users/{uid}")
+async def auth_delete_user(uid: int, request: Request):
+    caller = _caller(request)
+    if caller.get("role") != "admin": raise HTTPException(403, "Admins only")
+    if str(uid) == str(caller.get("sub")): raise HTTPException(400, "Cannot delete yourself")
+    c = _uconn(); c.execute("DELETE FROM users WHERE id=?", (uid,)); c.commit(); c.close()
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────
 # /api/companies
 # ─────────────────────────────────────────────
 @app.get("/api/companies")
@@ -144,8 +311,9 @@ async def kpis(
     db: str = Query("ogh-live"),
     year: int = Query(None),
     month: int = Query(None),
-    company_id: int = Query(None),
+    company_ids: str = Query(None),
 ):
+    ids = parse_ids(company_ids)
     today = date.today()
     y = year or today.year
     m = month or today.month
@@ -180,7 +348,7 @@ async def kpis(
               'income','income_other',
               'expense','expense_depreciation','expense_direct_cost')
           AND EXTRACT(YEAR FROM am.date)::int = $2
-          AND ($3::int IS NULL OR am.company_id = $3)
+          AND ($3::int[] IS NULL OR am.company_id = ANY($3::int[]))
     """
     ar_sql = """
         SELECT
@@ -191,7 +359,7 @@ async def kpis(
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
           AND am.amount_residual > 0
-          AND ($1::int IS NULL OR am.company_id = $1)
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
     """
     ap_sql = """
         SELECT
@@ -202,11 +370,11 @@ async def kpis(
         WHERE am.state = 'posted'
           AND am.move_type IN ('in_invoice','in_refund')
           AND am.amount_residual > 0
-          AND ($1::int IS NULL OR am.company_id = $1)
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
     """
-    pnl = await fetch_one(db, pnl_sql, m, y, company_id)
-    ar  = await fetch_one(db, ar_sql, company_id)
-    ap  = await fetch_one(db, ap_sql, company_id)
+    pnl = await fetch_one(db, pnl_sql, m, y, ids)
+    ar  = await fetch_one(db, ar_sql, ids)
+    ap  = await fetch_one(db, ap_sql, ids)
 
     mr, me = float(pnl.get("month_revenue") or 0), float(pnl.get("month_expense") or 0)
     yr, ye = float(pnl.get("ytd_revenue") or 0),   float(pnl.get("ytd_expense") or 0)
@@ -232,7 +400,7 @@ async def kpis(
 # /api/monthly-pnl   – Query 11
 # ─────────────────────────────────────────────
 @app.get("/api/monthly-pnl")
-async def monthly_pnl(db: str = Query("ogh-live"), company_id: int = Query(None)):
+async def monthly_pnl(db: str = Query("ogh-live"), company_ids: str = Query(None)):
     sql = """
         SELECT
             TO_CHAR(am.date, 'YYYY-MM')            AS year_month,
@@ -252,13 +420,14 @@ async def monthly_pnl(db: str = Query("ogh-live"), company_id: int = Query(None)
               'income','income_other',
               'expense','expense_depreciation','expense_direct_cost')
           AND am.date >= (CURRENT_DATE - INTERVAL '12 months')::date
-          AND ($1::int IS NULL OR am.company_id = $1)
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
         GROUP BY TO_CHAR(am.date, 'YYYY-MM'),
                  EXTRACT(YEAR  FROM am.date)::int,
                  EXTRACT(MONTH FROM am.date)::int
         ORDER BY year_month
     """
-    rows = await fetch(db, sql, company_id)
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, ids)
     return {"data": [
         {**r,
          "total_revenue": float(r["total_revenue"] or 0),
@@ -272,7 +441,7 @@ async def monthly_pnl(db: str = Query("ogh-live"), company_id: int = Query(None)
 # /api/ar-aging   – Query 9 (summary)
 # ─────────────────────────────────────────────
 @app.get("/api/ar-aging")
-async def ar_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
+async def ar_aging(db: str = Query("ogh-live"), company_ids: str = Query(None)):
     sql = """
         SELECT
             COALESCE(SUM(CASE WHEN am.invoice_date_due >= CURRENT_DATE
@@ -291,9 +460,10 @@ async def ar_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
           AND am.amount_residual > 0
-          AND ($1::int IS NULL OR am.company_id = $1)
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
     """
-    row = await fetch_one(db, sql, company_id)
+    ids = parse_ids(company_ids)
+    row = await fetch_one(db, sql, ids)
     return {k: float(v or 0) for k, v in row.items()}
 
 
@@ -301,7 +471,7 @@ async def ar_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
 # /api/ap-aging   – Query 10 (summary)
 # ─────────────────────────────────────────────
 @app.get("/api/ap-aging")
-async def ap_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
+async def ap_aging(db: str = Query("ogh-live"), company_ids: str = Query(None)):
     sql = """
         SELECT
             COALESCE(SUM(CASE WHEN am.invoice_date_due >= CURRENT_DATE
@@ -320,9 +490,10 @@ async def ap_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
         WHERE am.state = 'posted'
           AND am.move_type IN ('in_invoice','in_refund')
           AND am.amount_residual > 0
-          AND ($1::int IS NULL OR am.company_id = $1)
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
     """
-    row = await fetch_one(db, sql, company_id)
+    ids = parse_ids(company_ids)
+    row = await fetch_one(db, sql, ids)
     return {k: float(v or 0) for k, v in row.items()}
 
 
@@ -330,7 +501,7 @@ async def ap_aging(db: str = Query("ogh-live"), company_id: int = Query(None)):
 # /api/ar-customers  – Query 9 (detail)
 # ─────────────────────────────────────────────
 @app.get("/api/ar-customers")
-async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25), company_id: int = Query(None)):
+async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25), company_ids: str = Query(None)):
     sql = """
         SELECT
             rp.name AS customer,
@@ -351,12 +522,13 @@ async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25), comp
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
           AND am.amount_residual > 0
-          AND ($2::int IS NULL OR am.company_id = $2)
+          AND ($2::int[] IS NULL OR am.company_id = ANY($2::int[]))
         GROUP BY rp.name
         ORDER BY total_outstanding DESC
         LIMIT $1
     """
-    rows = await fetch(db, sql, limit, company_id)
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, limit, ids)
     return {"data": rows}
 
 
@@ -364,7 +536,7 @@ async def ar_customers(db: str = Query("ogh-live"), limit: int = Query(25), comp
 # /api/ap-vendors  – Query 10 (detail)
 # ─────────────────────────────────────────────
 @app.get("/api/ap-vendors")
-async def ap_vendors(db: str = Query("ogh-live"), limit: int = Query(25), company_id: int = Query(None)):
+async def ap_vendors(db: str = Query("ogh-live"), limit: int = Query(25), company_ids: str = Query(None)):
     sql = """
         SELECT
             rp.name AS vendor,
@@ -385,12 +557,13 @@ async def ap_vendors(db: str = Query("ogh-live"), limit: int = Query(25), compan
         WHERE am.state = 'posted'
           AND am.move_type IN ('in_invoice','in_refund')
           AND am.amount_residual > 0
-          AND ($2::int IS NULL OR am.company_id = $2)
+          AND ($2::int[] IS NULL OR am.company_id = ANY($2::int[]))
         GROUP BY rp.name
         ORDER BY total_outstanding DESC
         LIMIT $1
     """
-    rows = await fetch(db, sql, limit, company_id)
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, limit, ids)
     return {"data": rows}
 
 
@@ -402,8 +575,9 @@ async def pnl_detail(
     db: str = Query("ogh-live"),
     year: int = Query(None),
     month: int = Query(None),
-    company_id: int = Query(None),
+    company_ids: str = Query(None),
 ):
+    ids = parse_ids(company_ids)
     today = date.today()
     y = year or today.year
     m = month or today.month
@@ -432,13 +606,13 @@ async def pnl_detail(
               'expense','expense_depreciation','expense_direct_cost')
           AND EXTRACT(YEAR  FROM am.date)::int = $1
           AND EXTRACT(MONTH FROM am.date)::int = $2
-          AND ($3::int IS NULL OR am.company_id = $3)
+          AND ($3::int[] IS NULL OR am.company_id = ANY($3::int[]))
         GROUP BY aa.account_type,
                  aa.code_store->>(aml.company_id::text),
                  aa.name->>'en_US'
         ORDER BY category, account_code
     """
-    rows = await fetch(db, sql, y, m, company_id)
+    rows = await fetch(db, sql, y, m, ids)
     return {"data": rows, "period": {"year": y, "month": m}}
 
 
@@ -446,7 +620,7 @@ async def pnl_detail(
 # /api/balance-sheet  – Query 4
 # ─────────────────────────────────────────────
 @app.get("/api/balance-sheet")
-async def balance_sheet(db: str = Query("ogh-live"), company_id: int = Query(None)):
+async def balance_sheet(db: str = Query("ogh-live"), company_ids: str = Query(None)):
     sql = """
         SELECT
             CASE
@@ -468,13 +642,14 @@ async def balance_sheet(db: str = Query("ogh-live"), company_id: int = Query(Non
               'asset_non_current','asset_prepayments','asset_fixed',
               'liability_payable','liability_current','liability_non_current',
               'equity','equity_unaffected')
-          AND ($1::int IS NULL OR am.company_id = $1)
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
         GROUP BY aa.account_type,
                  aa.code_store->>(aml.company_id::text),
                  aa.name->>'en_US'
         ORDER BY category, account_code
     """
-    rows = await fetch(db, sql, company_id)
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, ids)
     return {"data": rows}
 
 
@@ -577,7 +752,7 @@ async def invoices(db: str = Query("ogh-live"), limit: int = Query(30)):
 # /api/yearly-summary
 # ─────────────────────────────────────────────
 @app.get("/api/yearly-summary")
-async def yearly_summary(db: str = Query("ogh-live"), company_id: int = Query(None)):
+async def yearly_summary(db: str = Query("ogh-live"), company_ids: str = Query(None)):
     sql = """
         SELECT
             EXTRACT(YEAR FROM am.date)::int AS year,
@@ -594,11 +769,12 @@ async def yearly_summary(db: str = Query("ogh-live"), company_id: int = Query(No
           AND aa.account_type IN (
               'income','income_other',
               'expense','expense_depreciation','expense_direct_cost')
-          AND ($1::int IS NULL OR am.company_id = $1)
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
         GROUP BY EXTRACT(YEAR FROM am.date)::int
         ORDER BY year
     """
-    rows = await fetch(db, sql, company_id)
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, ids)
     result = []
     for r in rows:
         rev  = float(r["total_revenue"] or 0)
@@ -622,7 +798,7 @@ async def export_excel(
     db: str = Query("ogh-live"),
     year: int = Query(None),
     month: int = Query(None),
-    company_id: int = Query(None),
+    company_ids: str = Query(None),
 ):
     if not XLSX_OK:
         raise HTTPException(501, "openpyxl not installed")
@@ -630,12 +806,12 @@ async def export_excel(
     y = year or today_dt.year
     m = month or today_dt.month
 
-    kpis_d   = await kpis(db=db, year=y, month=m, company_id=company_id)
-    pnl_d    = await monthly_pnl(db=db, company_id=company_id)
-    ar_c     = await ar_customers(db=db, limit=50, company_id=company_id)
-    ap_v     = await ap_vendors(db=db, limit=50, company_id=company_id)
-    pnl_det  = await pnl_detail(db=db, year=y, month=m, company_id=company_id)
-    bs_d     = await balance_sheet(db=db, company_id=company_id)
+    kpis_d   = await kpis(db=db, year=y, month=m, company_ids=company_ids)
+    pnl_d    = await monthly_pnl(db=db, company_ids=company_ids)
+    ar_c     = await ar_customers(db=db, limit=50, company_ids=company_ids)
+    ap_v     = await ap_vendors(db=db, limit=50, company_ids=company_ids)
+    pnl_det  = await pnl_detail(db=db, year=y, month=m, company_ids=company_ids)
+    bs_d     = await balance_sheet(db=db, company_ids=company_ids)
 
     MONTHS_L = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
     period_label = f"{MONTHS_L[m-1]} {y}"
@@ -801,7 +977,7 @@ async def export_pdf(
     db: str = Query("ogh-live"),
     year: int = Query(None),
     month: int = Query(None),
-    company_id: int = Query(None),
+    company_ids: str = Query(None),
 ):
     if not PDF_OK:
         raise HTTPException(501, "reportlab not installed")
@@ -809,12 +985,12 @@ async def export_pdf(
     y = year or today_dt.year
     m = month or today_dt.month
 
-    kpis_d  = await kpis(db=db, year=y, month=m, company_id=company_id)
-    pnl_d   = await monthly_pnl(db=db, company_id=company_id)
-    ar_c    = await ar_customers(db=db, limit=20, company_id=company_id)
-    ap_v    = await ap_vendors(db=db, limit=20, company_id=company_id)
-    pnl_det = await pnl_detail(db=db, year=y, month=m, company_id=company_id)
-    bs_d    = await balance_sheet(db=db, company_id=company_id)
+    kpis_d  = await kpis(db=db, year=y, month=m, company_ids=company_ids)
+    pnl_d   = await monthly_pnl(db=db, company_ids=company_ids)
+    ar_c    = await ar_customers(db=db, limit=20, company_ids=company_ids)
+    ap_v    = await ap_vendors(db=db, limit=20, company_ids=company_ids)
+    pnl_det = await pnl_detail(db=db, year=y, month=m, company_ids=company_ids)
+    bs_d    = await balance_sheet(db=db, company_ids=company_ids)
 
     MONTHS_L = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
     period_label   = f"{MONTHS_L[m-1]} {y}"
@@ -979,7 +1155,7 @@ class ChatContext(BaseModel):
     db: str = "ogh-live"
     year: int = 2025
     month: int = 1
-    company_id: Optional[int] = None
+    company_ids: Optional[str] = None
     kpis: dict = {}
     monthly_pnl: List[dict] = []
     ar_customers: List[dict] = []
