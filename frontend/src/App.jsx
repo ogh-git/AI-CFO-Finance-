@@ -290,11 +290,6 @@ export default function App() {
       <Sidebar
         section={section}
         onSection={setSection}
-        selectedDbs={selectedDbs}
-        onDbToggle={handleDbToggle}
-        subCompanies={subCompanies}
-        selectedEntities={selectedEntities}
-        onEntityToggle={handleEntityToggle}
         user={user}
         onLogout={handleLogout}
       />
@@ -302,7 +297,49 @@ export default function App() {
       <div className="main-content">
 
         {section !== 'users' && (
-          <div className="controls" style={{ paddingTop: 20 }}>
+          <div className="company-bar">
+            <div className="company-bar-pills">
+              <button
+                className={`company-tab ${selectedDbs.length === 0 ? 'active' : ''}`}
+                onClick={() => handleDbToggle('all')}
+              >All Companies</button>
+              {[
+                { id: 'ogh-live',  label: 'OGH Live'   },
+                { id: '77asia',    label: '77 Asia'     },
+                { id: 'seeenviro', label: 'SEE Enviro'  },
+              ].map(d => (
+                <button
+                  key={d.id}
+                  className={`company-tab ${selectedDbs.includes(d.id) ? 'active' : ''}`}
+                  onClick={() => handleDbToggle(d.id)}
+                >{d.label}</button>
+              ))}
+            </div>
+
+            {subCompanies.length > 0 && selectedDbs.length === 1 && (
+              <div className="company-bar-pills" style={{ marginTop: 10 }}>
+                <span className="company-bar-label">Entity</span>
+                <button
+                  className={`pill ${selectedEntities.length === 0 ? 'active' : ''}`}
+                  onClick={() => handleEntityToggle('all')}
+                >All</button>
+                {subCompanies.map(c => (
+                  <button
+                    key={c.id}
+                    className={`pill ${selectedEntities.includes(c.id) ? 'active' : ''}`}
+                    onClick={() => handleEntityToggle(c.id)}
+                    title={c.name}
+                  >
+                    {c.name.length > 28 ? c.name.slice(0, 26) + '…' : c.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {section !== 'users' && (
+          <div className="controls" style={{ paddingTop: 4 }}>
             <div style={{ flex: '0 0 auto', marginRight: 4 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{dbLabel}</span>
               <span style={{ fontSize: 12, color: 'var(--text2)', marginLeft: 6 }}>

@@ -342,6 +342,21 @@ tbody td:first-child { text-align: left; color: var(--text); font-weight: 500; m
 .chat-send:hover { background: #388bfd; }
 .chat-send.disabled { background: var(--border); cursor: not-allowed; }
 
+/* ── Company / entity bar (top of main content) ─── */
+.company-bar {
+  padding: 20px 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+.company-bar-pills {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+}
+.company-bar-label {
+  font-size: 11px; font-weight: 700; color: var(--text2);
+  text-transform: uppercase; letter-spacing: .6px;
+  margin-right: 2px; white-space: nowrap;
+}
+
 /* ── App layout (sidebar + main) ─────────────────── */
 .app-layout { display: flex; min-height: 100vh; }
 .main-content { margin-left: 240px; flex: 1; min-width: 0; padding: 0 24px 40px; }
