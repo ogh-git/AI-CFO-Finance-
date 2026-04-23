@@ -397,7 +397,19 @@ export default function App() {
               <KPICard label="AP Outstanding" value={kpis?.total_ap} sub={`Overdue >30d: ${fmt(kpis?.overdue_ap)}`} color="purple" />
             </div>
             <div className="charts-row">
-              <MonthlyChart data={monthlyPnl} />
+              <MonthlyChart
+                data={monthlyPnl}
+                selectedMonth={{ month, year }}
+                onBarClick={(m, y) => {
+                  if (m === null) {
+                    setMonth(now.getMonth() + 1)
+                    setYear(now.getFullYear())
+                  } else {
+                    setMonth(m)
+                    setYear(y)
+                  }
+                }}
+              />
               <AgingDonut title="AR Aging" data={arAging} />
               <AgingDonut title="AP Aging" data={apAging} />
             </div>
