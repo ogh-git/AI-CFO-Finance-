@@ -182,13 +182,19 @@ export default function App() {
     try {
       const token = localStorage.getItem('cfo_token') || ''
       const r = await fetch(`/api/export/${type}?${p}`, { headers: { Authorization: `Bearer ${token}` } })
-      if (!r.ok) throw new Error('Export failed')
+      if (!r.ok) {
+        const msg = await r.text().catch(() => r.status)
+        throw new Error(`Export failed (${r.status}): ${msg}`)
+      }
       const blob = await r.blob()
-      const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob)
-      a.download = `finance-export.${type === 'excel' ? 'xlsx' : 'pdf'}`
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href     = url
+      a.download = `finance-export-${db}-${year}-${String(month).padStart(2, '0')}.${type === 'excel' ? 'xlsx' : 'pdf'}`
+      document.body.appendChild(a)
       a.click()
-      URL.revokeObjectURL(a.href)
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 2000)
     } catch (e) { setError(e.message) }
   }
 
