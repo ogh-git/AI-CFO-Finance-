@@ -1,7 +1,8 @@
 const SECTIONS = [
-  { id: 'summary', icon: '◈', label: 'Summary' },
-  { id: 'details', icon: '≡', label: 'Details'  },
-  { id: 'users',   icon: '⊙', label: 'Users'    },
+  { id: 'summary',      icon: '◈', label: 'Summary'      },
+  { id: 'details',      icon: '≡', label: 'Details'       },
+  { id: 'transactions', icon: '⇄', label: 'Transactions'  },
+  { id: 'users',        icon: '⊙', label: 'Users'         },
 ]
 
 export default function Sidebar({ section, onSection, user, onLogout }) {

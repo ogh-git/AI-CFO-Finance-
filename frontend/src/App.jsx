@@ -11,6 +11,7 @@ import PnLDetail     from './components/PnLDetail'
 import BalanceSheet  from './components/BalanceSheet'
 import ChatPanel     from './components/ChatPanel'
 import YearlySummary from './components/YearlySummary'
+import Transactions  from './components/Transactions'
 
 const ALL_DBS = ['ogh-live', '77asia', 'seeenviro']
 const DB_LABELS = { 'ogh-live': 'OGH Live', '77asia': '77 Asia', 'seeenviro': 'SEE Enviro' }
@@ -302,7 +303,7 @@ export default function App() {
 
       <div className="main-content">
 
-        {section !== 'users' && (
+        {(section === 'summary' || section === 'details' || section === 'transactions') && (
           <div className="company-bar">
             <div className="company-bar-pills">
               <button
@@ -344,7 +345,7 @@ export default function App() {
           </div>
         )}
 
-        {section !== 'users' && (
+        {(section === 'summary' || section === 'details') && (
           <div className="controls" style={{ paddingTop: 4 }}>
             <div style={{ flex: '0 0 auto', marginRight: 4 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{dbLabel}</span>
@@ -390,7 +391,13 @@ export default function App() {
 
         {error && <div className="error-banner">⚠ {error}</div>}
 
-        {section === 'users' && <UserManager currentUser={user} />}
+        {section === 'users'        && <UserManager currentUser={user} />}
+        {section === 'transactions' && (
+          <Transactions
+            db={effectiveDbs[0]}
+            ids={selectedEntities.length > 0 ? selectedEntities : null}
+          />
+        )}
 
         {section === 'summary' && (
           <>

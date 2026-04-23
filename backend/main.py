@@ -657,7 +657,7 @@ async def balance_sheet(db: str = Query("ogh-live"), company_ids: str = Query(No
 # /api/trial-balance  – Query 2
 # ─────────────────────────────────────────────
 @app.get("/api/trial-balance")
-async def trial_balance(db: str = Query("ogh-live")):
+async def trial_balance(db: str = Query("ogh-live"), company_ids: str = Query(None)):
     sql = """
         SELECT
             aa.code_store->>(aml.company_id::text) AS account_code,
@@ -670,11 +670,13 @@ async def trial_balance(db: str = Query("ogh-live")):
         JOIN account_move    am ON am.id = aml.move_id
         JOIN account_account aa ON aa.id = aml.account_id
         WHERE am.state = 'posted'
+          AND ($1::int[] IS NULL OR aml.company_id = ANY($1::int[]))
         GROUP BY aa.code_store->>(aml.company_id::text),
                  aa.name->>'en_US', aa.account_type
         ORDER BY account_code
     """
-    rows = await fetch(db, sql)
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, ids)
     return {"data": rows}
 
 
@@ -682,7 +684,8 @@ async def trial_balance(db: str = Query("ogh-live")):
 # /api/cash  – Query 7
 # ─────────────────────────────────────────────
 @app.get("/api/cash")
-async def cash(db: str = Query("ogh-live"), limit: int = Query(30)):
+async def cash(db: str = Query("ogh-live"), limit: int = Query(100),
+               company_ids: str = Query(None)):
     sql = """
         SELECT
             am.name                 AS payment_reference,
@@ -702,10 +705,12 @@ async def cash(db: str = Query("ogh-live"), limit: int = Query(30)):
         LEFT JOIN res_partner rp ON rp.id = am.partner_id
         WHERE am.state = 'posted'
           AND aj.type IN ('bank','cash')
+          AND ($2::int[] IS NULL OR am.company_id = ANY($2::int[]))
         ORDER BY am.date DESC
         LIMIT $1
     """
-    rows = await fetch(db, sql, limit)
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, limit, ids)
     return {"data": rows}
 
 
@@ -713,7 +718,8 @@ async def cash(db: str = Query("ogh-live"), limit: int = Query(30)):
 # /api/invoices  – Query 5
 # ─────────────────────────────────────────────
 @app.get("/api/invoices")
-async def invoices(db: str = Query("ogh-live"), limit: int = Query(30)):
+async def invoices(db: str = Query("ogh-live"), limit: int = Query(100),
+                   company_ids: str = Query(None)):
     sql = """
         SELECT
             am.name                 AS invoice_number,
@@ -741,10 +747,101 @@ async def invoices(db: str = Query("ogh-live"), limit: int = Query(30)):
         JOIN res_currency rc ON rc.id = am.currency_id
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
+          AND ($2::int[] IS NULL OR am.company_id = ANY($2::int[]))
         ORDER BY am.invoice_date DESC
         LIMIT $1
     """
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, limit, ids)
+    return {"data": rows}
+
+
+# ─────────────────────────────────────────────
+# /api/partners  – Partner Master
+# ─────────────────────────────────────────────
+@app.get("/api/partners")
+async def partners(db: str = Query("ogh-live"), limit: int = Query(200)):
+    sql = """
+        SELECT
+            rp.name                                     AS partner_name,
+            CASE WHEN rp.customer_rank > 0 AND rp.supplier_rank > 0
+                      THEN 'Customer & Vendor'
+                 WHEN rp.customer_rank > 0 THEN 'Customer'
+                 WHEN rp.supplier_rank > 0 THEN 'Vendor'
+                 ELSE 'Other'
+            END                                         AS partner_type,
+            COALESCE(rp.email, '')                      AS email,
+            COALESCE(rp.phone, '')                      AS phone,
+            COALESCE(rp.vat,   '')                      AS tax_id,
+            COALESCE(rc.name->>'en_US', '')             AS country,
+            rp.customer_rank,
+            rp.supplier_rank
+        FROM res_partner rp
+        LEFT JOIN res_country rc ON rc.id = rp.country_id
+        WHERE rp.active = true
+          AND (rp.customer_rank > 0 OR rp.supplier_rank > 0)
+          AND rp.parent_id IS NULL
+        ORDER BY rp.name
+        LIMIT $1
+    """
     rows = await fetch(db, sql, limit)
+    return {"data": rows}
+
+
+# ─────────────────────────────────────────────
+# /api/journals  – Journal Master
+# ─────────────────────────────────────────────
+@app.get("/api/journals")
+async def journals(db: str = Query("ogh-live"), company_ids: str = Query(None)):
+    sql = """
+        SELECT
+            aj.code                             AS journal_code,
+            aj.name->>'en_US'                   AS journal_name,
+            aj.type                             AS journal_type,
+            COALESCE(rc.name, '')               AS currency,
+            COUNT(am.id)                        AS move_count,
+            COALESCE(SUM(am.amount_total), 0)   AS total_amount
+        FROM account_journal aj
+        LEFT JOIN res_currency rc ON rc.id = aj.currency_id
+        LEFT JOIN account_move am ON am.journal_id = aj.id AND am.state = 'posted'
+        WHERE ($1::int[] IS NULL OR aj.company_id = ANY($1::int[]))
+        GROUP BY aj.id, aj.code, aj.name->>'en_US', aj.type, rc.name
+        ORDER BY aj.type, aj.code
+    """
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, ids)
+    return {"data": rows}
+
+
+# ─────────────────────────────────────────────
+# /api/purchase-orders  – Vendor Bills Summary
+# ─────────────────────────────────────────────
+@app.get("/api/purchase-orders")
+async def purchase_orders(db: str = Query("ogh-live"), limit: int = Query(100),
+                          company_ids: str = Query(None)):
+    sql = """
+        SELECT
+            am.name                             AS bill_number,
+            rp.name                             AS vendor,
+            am.invoice_date                     AS bill_date,
+            am.invoice_date_due                 AS due_date,
+            am.payment_state,
+            rc.name                             AS currency,
+            COALESCE(am.amount_untaxed, 0)      AS subtotal,
+            COALESCE(am.amount_tax,    0)       AS tax_amount,
+            COALESCE(am.amount_total,  0)       AS total_amount,
+            COALESCE(am.amount_residual, 0)     AS amount_due
+        FROM account_move am
+        JOIN res_partner  rp ON rp.id = am.partner_id
+        JOIN res_currency rc ON rc.id = am.currency_id
+        WHERE am.state = 'posted'
+          AND am.move_type IN ('in_invoice','in_refund')
+          AND ($2::int[] IS NULL OR am.company_id = ANY($2::int[]))
+        ORDER BY am.invoice_date DESC
+        LIMIT $1
+    """
+    ids = parse_ids(company_ids)
+    rows = await fetch(db, sql, limit, ids)
     return {"data": rows}
 
 

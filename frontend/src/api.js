@@ -43,7 +43,13 @@ export const api = {
   deleteUser:   (id)                            => del(`/auth/users/${id}`),
 
   // data
-  companies:     ()                              => get('/companies'),
+  companies:      ()                              => get('/companies'),
+  cash:           (db, ids)                       => get(`/cash?db=${db}&limit=100${cids(ids)}`),
+  invoices:       (db, ids)                       => get(`/invoices?db=${db}&limit=100${cids(ids)}`),
+  trialBalance:   (db, ids)                       => get(`/trial-balance?db=${db}${cids(ids)}`),
+  partners:       (db)                            => get(`/partners?db=${db}&limit=200`),
+  journals:       (db, ids)                       => get(`/journals?db=${db}${cids(ids)}`),
+  purchaseOrders: (db, ids)                       => get(`/purchase-orders?db=${db}&limit=100${cids(ids)}`),
   subCompanies:  (db)                            => get(`/sub-companies?db=${db}`),
   kpis:          (db, year, month, ids)          => get(`/kpis?db=${db}&year=${year}&month=${month}${cids(ids)}`),
   monthlyPnl:    (db, ids)                       => get(`/monthly-pnl?db=${db}${cids(ids)}`),
