@@ -29,8 +29,16 @@ const post = (path, body) => fetch(BASE + path, {
   method: 'POST',
   headers: { Authorization: `Bearer ${tok()}`, 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
-}).then(r => {
-  if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `Error ${r.status}`) })
+}).then(async r => {
+  if (!r.ok) {
+    const text = await r.text().catch(() => '')
+    let msg = `Error ${r.status}`
+    try { const j = JSON.parse(text); msg = j.detail || j.message || msg } catch (_) {
+      if (text) msg = text.slice(0, 120)
+    }
+    if (r.status === 502 || r.status === 503 || r.status === 0) msg = 'Backend not reachable — is the server running?'
+    throw new Error(msg)
+  }
   return r.json()
 })
 

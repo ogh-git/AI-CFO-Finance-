@@ -16,8 +16,18 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 try:
-    from passlib.context import CryptContext
+    import bcrypt as _bcrypt
     from jose import JWTError, jwt as jose_jwt
+
+    class _PwdCtx:
+        def hash(self, secret: str) -> str:
+            return _bcrypt.hashpw(secret.encode(), _bcrypt.gensalt()).decode()
+        def verify(self, secret: str, hashed: str) -> bool:
+            try:
+                return _bcrypt.checkpw(secret.encode(), hashed.encode())
+            except Exception:
+                return False
+
     AUTH_OK = True
 except ImportError:
     AUTH_OK = False
@@ -55,11 +65,11 @@ log = logging.getLogger(__name__)
 load_dotenv()
 
 # ── Auth / Users ──────────────────────────────────────
-USERS_DB   = os.getenv("USERS_DB", "/app/data/users.db")
+USERS_DB   = os.getenv("USERS_DB", os.path.join(os.path.dirname(__file__), "data", "users.db"))
 JWT_SECRET = os.getenv("JWT_SECRET", "cfo-dashboard-secret-change-in-prod")
 JWT_ALG    = "HS256"
 JWT_HOURS  = 24
-pwd_ctx    = CryptContext(schemes=["bcrypt"], deprecated="auto") if AUTH_OK else None
+pwd_ctx    = _PwdCtx() if AUTH_OK else None
 
 def _uconn():
     os.makedirs(os.path.dirname(USERS_DB), exist_ok=True)

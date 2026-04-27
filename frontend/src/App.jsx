@@ -1,28 +1,29 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { api, fmt, MONTHS, clearApiCache } from './api'
-import Login         from './pages/Login'
-import Sidebar       from './components/Sidebar'
-import UserManager   from './components/UserManager'
-import KPICard       from './components/KPICard'
-import MonthlyChart  from './components/MonthlyChart'
-import AgingDonut    from './components/AgingDonut'
-import AgingTable    from './components/AgingTable'
-import PnLDetail     from './components/PnLDetail'
-import BalanceSheet  from './components/BalanceSheet'
-import ChatPanel     from './components/ChatPanel'
-import YearlySummary from './components/YearlySummary'
-import Transactions  from './components/Transactions'
+import Login                from './pages/Login'
+import Sidebar              from './components/Sidebar'
+import UserManager          from './components/UserManager'
+import KPICard              from './components/KPICard'
+import MonthlyChart         from './components/MonthlyChart'
+import AgingDonut           from './components/AgingDonut'
+import AgingTable           from './components/AgingTable'
+import PnLDetail            from './components/PnLDetail'
+import BalanceSheet         from './components/BalanceSheet'
+import ChatPanel            from './components/ChatPanel'
+import YearlySummary        from './components/YearlySummary'
+import Transactions         from './components/Transactions'
+import MultiSelectDropdown  from './components/MultiSelectDropdown'
 
-const ALL_DBS = ['ogh-live', '77asia', 'seeenviro']
+const ALL_DBS   = ['ogh-live', '77asia', 'seeenviro']
 const DB_LABELS = { 'ogh-live': 'OGH Live', '77asia': '77 Asia', 'seeenviro': 'SEE Enviro' }
 
 function mergeKpis(list) {
   const sum = (k) => list.reduce((a, x) => a + (Number(x?.[k]) || 0), 0)
-  const rev      = sum('month_revenue')
-  const exp      = sum('month_expense')
-  const profit   = rev - exp
-  const ytdRev   = sum('ytd_revenue')
-  const ytdExp   = sum('ytd_expense')
+  const rev       = sum('month_revenue')
+  const exp       = sum('month_expense')
+  const profit    = rev - exp
+  const ytdRev    = sum('ytd_revenue')
+  const ytdExp    = sum('ytd_expense')
   const ytdProfit = ytdRev - ytdExp
   return {
     month_revenue: rev, month_expense: exp, month_profit: profit,
@@ -37,13 +38,17 @@ function mergeKpis(list) {
 function mergeMonthlyPnl(lists) {
   const map = {}
   lists.flat().forEach(row => {
-    const key = row.month
-    if (!map[key]) map[key] = { ...row, revenue: 0, expense: 0, profit: 0 }
-    map[key].revenue += Number(row.revenue) || 0
-    map[key].expense += Number(row.expense) || 0
-    map[key].profit  += Number(row.profit)  || 0
+    const key = row.year_month || `${row.year}-${String(row.month).padStart(2, '0')}`
+    if (!map[key]) map[key] = { ...row, total_revenue: 0, total_expense: 0, net_profit: 0 }
+    map[key].total_revenue += Number(row.total_revenue) || 0
+    map[key].total_expense += Number(row.total_expense) || 0
+    map[key].net_profit    += Number(row.net_profit)    || 0
   })
-  return Object.values(map).sort((a, b) => a.month < b.month ? -1 : 1)
+  return Object.values(map).sort((a, b) => {
+    const ka = a.year_month || `${a.year}-${String(a.month).padStart(2, '0')}`
+    const kb = b.year_month || `${b.year}-${String(b.month).padStart(2, '0')}`
+    return ka < kb ? -1 : 1
+  })
 }
 
 function mergeAging(list) {
@@ -84,7 +89,8 @@ function mergeYearlySummary(lists) {
     map[key].total_expense += Number(row.total_expense) || 0
   })
   return Object.values(map).sort((a, b) => a.year - b.year).map(r => ({
-    ...r, net_profit: r.total_revenue - r.total_expense,
+    ...r,
+    net_profit: r.total_revenue - r.total_expense,
     margin: r.total_revenue ? +((r.total_revenue - r.total_expense) / r.total_revenue * 100).toFixed(1) : 0,
   }))
 }
@@ -99,6 +105,30 @@ function mergeBalanceSheet(lists) {
   return Object.values(map)
 }
 
+// Compute totals for selected months from monthlyPnl (last 12 months)
+function computePeriodKpis(monthlyPnl, selectedMonths, selectedYears) {
+  const filtered = monthlyPnl.filter(r => {
+    const yearOk  = selectedYears.length  === 0 || selectedYears.includes(Number(r.year))
+    const monthOk = selectedMonths.length === 0 || selectedMonths.includes(Number(r.month))
+    return yearOk && monthOk
+  })
+  const rev = filtered.reduce((s, x) => s + (Number(x.total_revenue) || 0), 0)
+  const exp = filtered.reduce((s, x) => s + (Number(x.total_expense) || 0), 0)
+  const pft = rev - exp
+  return { revenue: rev, expense: exp, profit: pft, margin: rev ? ((pft / rev) * 100).toFixed(1) : '0.0' }
+}
+
+// Compute full-year totals from yearlySummary for selected years
+function computeYearKpis(yearlySummary, selectedYears) {
+  const filtered = selectedYears.length === 0
+    ? yearlySummary
+    : yearlySummary.filter(r => selectedYears.includes(Number(r.year)))
+  const rev = filtered.reduce((s, x) => s + (Number(x.total_revenue) || 0), 0)
+  const exp = filtered.reduce((s, x) => s + (Number(x.total_expense) || 0), 0)
+  const pft = rev - exp
+  return { revenue: rev, expense: exp, profit: pft, margin: rev ? ((pft / rev) * 100).toFixed(1) : '0.0' }
+}
+
 const INTERVALS   = [{ v: 30, l: '30 sec' }, { v: 60, l: '1 min' }, { v: 300, l: '5 min' }, { v: 900, l: '15 min' }]
 const DETAIL_TABS = ['P&L Detail', 'Balance Sheet', 'Year Summary']
 const now = new Date()
@@ -111,12 +141,12 @@ export default function App() {
 
   // Company / entity selection ([] = all selected)
   const [selectedDbs,      setSelectedDbs]      = useState([])
-  const [subCompanies,     setSubCompanies]     = useState([])
-  const [selectedEntities, setSelectedEntities] = useState([])
+  const [subCompanies,     setSubCompanies]      = useState([])
+  const [selectedEntities, setSelectedEntities]  = useState([])
 
-  // Period
-  const [year,  setYear]  = useState(now.getFullYear())
-  const [month, setMonth] = useState(now.getMonth() + 1)
+  // Period — [] means "all" (same convention used for company selection)
+  const [selectedYears,  setSelectedYears]  = useState([now.getFullYear()])
+  const [selectedMonths, setSelectedMonths] = useState([now.getMonth() + 1])
 
   // Data
   const [kpis,          setKpis]          = useState(null)
@@ -174,10 +204,20 @@ export default function App() {
       .catch(() => setSubCompanies([]))
   }, [selectedDbs])
 
+  // Serialize for stable dependency keys
+  const selectedDbsKey      = selectedDbs.join(',')
+  const selectedEntitiesKey = selectedEntities.join(',')
+  const selectedYearsKey    = [...selectedYears].sort((a, b) => a - b).join(',')
+  const selectedMonthsKey   = [...selectedMonths].sort((a, b) => a - b).join(',')
+
+  // Primary year/month for API calls — use the most recent/largest selected
+  const primaryYear  = selectedYears.length  > 0 ? Math.max(...selectedYears)  : now.getFullYear()
+  const primaryMonth = selectedMonths.length > 0 ? Math.max(...selectedMonths) : now.getMonth() + 1
+
   const downloadExport = async (type) => {
     const effectiveDbs = selectedDbs.length === 0 ? ALL_DBS : selectedDbs
     const db = effectiveDbs[0]
-    const p = new URLSearchParams({ db, year, month })
+    const p = new URLSearchParams({ db, year: primaryYear, month: primaryMonth })
     if (selectedEntities.length > 0) p.set('company_ids', selectedEntities.join(','))
     setExportOpen(false)
     try {
@@ -191,7 +231,7 @@ export default function App() {
       const url  = URL.createObjectURL(blob)
       const a    = document.createElement('a')
       a.href     = url
-      a.download = `finance-export-${db}-${year}-${String(month).padStart(2, '0')}.${type === 'excel' ? 'xlsx' : 'pdf'}`
+      a.download = `finance-export-${db}-${primaryYear}-${String(primaryMonth).padStart(2, '0')}.${type === 'excel' ? 'xlsx' : 'pdf'}`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
@@ -199,27 +239,25 @@ export default function App() {
     } catch (e) { setError(e.message) }
   }
 
-  // Serialize arrays to primitives to avoid stale-closure / reference issues in useCallback
-  const selectedDbsKey      = selectedDbs.join(',')
-  const selectedEntitiesKey = selectedEntities.join(',')
-
   const fetchAll = useCallback(async () => {
     setLoading(true); setError(null)
     const effectiveDbs = selectedDbsKey === '' || selectedDbsKey.split(',').length === ALL_DBS.length
       ? ALL_DBS : selectedDbsKey.split(',')
     const entityIds = effectiveDbs.length === 1 && selectedEntitiesKey
       ? selectedEntitiesKey.split(',').map(Number) : null
+    const apiYear  = selectedYearsKey  ? Math.max(...selectedYearsKey.split(',').map(Number))  : now.getFullYear()
+    const apiMonth = selectedMonthsKey ? Math.max(...selectedMonthsKey.split(',').map(Number)) : now.getMonth() + 1
     try {
       if (effectiveDbs.length > 1) {
         const results = await Promise.all(
           effectiveDbs.map(d => Promise.all([
-            api.kpis(d, year, month, null),
+            api.kpis(d, apiYear, apiMonth, null),
             api.monthlyPnl(d, null),
             api.arAging(d, null),
             api.apAging(d, null),
             api.arCustomers(d, null),
             api.apVendors(d, null),
-            api.pnlDetail(d, year, month, null),
+            api.pnlDetail(d, apiYear, apiMonth, null),
             api.balanceSheet(d, null),
             api.yearlySummary(d, null),
           ]))
@@ -237,13 +275,13 @@ export default function App() {
       } else {
         const db = effectiveDbs[0]
         const [kpisData, pnlData, arA, apA, arC, apV, pnlD, bs, yrly] = await Promise.all([
-          api.kpis(db, year, month, entityIds),
+          api.kpis(db, apiYear, apiMonth, entityIds),
           api.monthlyPnl(db, entityIds),
           api.arAging(db, entityIds),
           api.apAging(db, entityIds),
           api.arCustomers(db, entityIds),
           api.apVendors(db, entityIds),
-          api.pnlDetail(db, year, month, entityIds),
+          api.pnlDetail(db, apiYear, apiMonth, entityIds),
           api.balanceSheet(db, entityIds),
           api.yearlySummary(db, entityIds),
         ])
@@ -265,7 +303,7 @@ export default function App() {
       setLoading(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDbsKey, selectedEntitiesKey, year, month])
+  }, [selectedDbsKey, selectedEntitiesKey, selectedYearsKey, selectedMonthsKey])
 
   useEffect(() => {
     if (!user) return
@@ -280,14 +318,40 @@ export default function App() {
     return () => clearInterval(timerRef.current)
   }, [autoRefresh, interval, fetchAll, user])
 
-  const profit    = kpis ? kpis.month_profit : null
-  const ytdProfit = kpis ? kpis.ytd_profit   : null
-  const yearOptions = Array.from({ length: 5 }, (_, i) => now.getFullYear() - i)
+  // Derived KPIs — computed from loaded data, no extra API calls
+  const periodKpis = useMemo(
+    () => computePeriodKpis(monthlyPnl, selectedMonths, selectedYears),
+    [monthlyPnl, selectedMonths, selectedYears]
+  )
+  const yearKpis = useMemo(
+    () => computeYearKpis(yearlySummary, selectedYears),
+    [yearlySummary, selectedYears]
+  )
+
+  // Labels for display
+  const periodDisplayLabel = (() => {
+    const yStr = selectedYears.length === 0 ? 'All Years'
+      : selectedYears.slice().sort((a, b) => a - b).join(', ')
+    if (selectedMonths.length === 0) return `All Months · ${yStr}`
+    const sorted = selectedMonths.slice().sort((a, b) => a - b)
+    if (sorted.length === 12) return `Full Year · ${yStr}`
+    if (sorted.length === 1)  return `${MONTHS[sorted[0] - 1]} · ${yStr}`
+    return `${sorted.map(m => MONTHS[m - 1]).join(', ')} · ${yStr}`
+  })()
+
+  const yearDisplayLabel = selectedYears.length === 0 ? 'All Years'
+    : selectedYears.slice().sort((a, b) => a - b).join(', ')
+
+  const yearOptions = Array.from({ length: 6 }, (_, i) => now.getFullYear() - i)
 
   const effectiveDbs = selectedDbs.length === 0 ? ALL_DBS : selectedDbs
   const dbLabel = effectiveDbs.length === ALL_DBS.length
     ? 'All Companies'
     : effectiveDbs.map(d => DB_LABELS[d]).join(', ')
+
+  // Pass single month/year to chart highlight only when exactly one is selected
+  const chartSelectedMonth = selectedMonths.length === 1 && selectedYears.length === 1
+    ? { month: selectedMonths[0], year: selectedYears[0] } : null
 
   if (!authChecked) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: '#8b949e', fontSize: 14 }}>
@@ -317,9 +381,9 @@ export default function App() {
                 onClick={() => handleDbToggle('all')}
               >All Companies</button>
               {[
-                { id: 'ogh-live',  label: 'OGH Live'   },
-                { id: '77asia',    label: '77 Asia'     },
-                { id: 'seeenviro', label: 'SEE Enviro'  },
+                { id: 'ogh-live',  label: 'OGH Live'  },
+                { id: '77asia',    label: '77 Asia'    },
+                { id: 'seeenviro', label: 'SEE Enviro' },
               ].map(d => (
                 <button
                   key={d.id}
@@ -355,18 +419,24 @@ export default function App() {
           <div className="controls" style={{ paddingTop: 4 }}>
             <div style={{ flex: '0 0 auto', marginRight: 4 }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{dbLabel}</span>
-              <span style={{ fontSize: 12, color: 'var(--text2)', marginLeft: 6 }}>
-                {MONTHS[month - 1]} {year}
-              </span>
             </div>
             <div style={{ width: 1, height: 20, background: '#30363d', margin: '0 4px' }} />
-            <label>Period</label>
-            <select value={month} onChange={e => setMonth(Number(e.target.value))}>
-              {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
-            </select>
-            <select value={year} onChange={e => setYear(Number(e.target.value))}>
-              {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
+            <label>Months</label>
+            <MultiSelectDropdown
+              options={MONTHS.map((m, i) => ({ value: i + 1, label: m }))}
+              selected={selectedMonths}
+              onChange={setSelectedMonths}
+              allLabel="All Months"
+              minWidth={108}
+            />
+            <label>Year</label>
+            <MultiSelectDropdown
+              options={yearOptions.map(y => ({ value: y, label: String(y) }))}
+              selected={selectedYears}
+              onChange={setSelectedYears}
+              allLabel="All Years"
+              minWidth={100}
+            />
             <div style={{ width: 1, height: 20, background: '#30363d', margin: '0 4px' }} />
             <label>Auto-refresh</label>
             <button className={`btn ${autoRefresh ? 'primary' : ''}`} onClick={() => setAutoRefresh(v => !v)}>
@@ -409,25 +479,62 @@ export default function App() {
 
         {section === 'summary' && (
           <>
-            <div className="kpi-grid">
-              <KPICard label="Month Revenue"  value={kpis?.month_revenue} sub={`YTD: ${fmt(kpis?.ytd_revenue)}`} color="green" />
-              <KPICard label="Month Expense"  value={kpis?.month_expense} sub={`YTD: ${fmt(kpis?.ytd_expense)}`} color="red" />
-              <KPICard label="Net Profit"     value={profit}    sub={`Margin: ${kpis?.month_margin ?? '–'}%`} badge={kpis?.month_margin} color={profit >= 0 ? 'blue' : 'red'} />
-              <KPICard label="YTD Net Profit" value={ytdProfit} sub={`Margin: ${kpis?.ytd_margin ?? '–'}%`}   badge={kpis?.ytd_margin}   color={ytdProfit >= 0 ? 'blue' : 'red'} />
-              <KPICard label="AR Outstanding" value={kpis?.total_ar} sub={`Overdue >30d: ${fmt(kpis?.overdue_ar)}`} color="teal" />
-              <KPICard label="AP Outstanding" value={kpis?.total_ap} sub={`Overdue >30d: ${fmt(kpis?.overdue_ap)}`} color="purple" />
+            {/* ── Period KPIs (based on selected months) ── */}
+            <div className="kpi-row-group">
+              <div className="kpi-row-label">
+                Period <span>{periodDisplayLabel}</span>
+              </div>
+              <div className="kpi-grid-3">
+                <KPICard label="Revenue"    value={periodKpis.revenue} color="green" />
+                <KPICard label="Expense"    value={periodKpis.expense} color="red" />
+                <KPICard
+                  label="Net Profit"
+                  value={periodKpis.profit}
+                  sub={`Margin: ${periodKpis.margin}%`}
+                  badge={Number(periodKpis.margin)}
+                  color={periodKpis.profit >= 0 ? 'blue' : 'red'}
+                />
+              </div>
             </div>
+
+            {/* ── Year Total KPIs (from yearlySummary) ── */}
+            <div className="kpi-row-group">
+              <div className="kpi-row-label">
+                Year Total <span>{yearDisplayLabel}</span>
+              </div>
+              <div className="kpi-grid-3">
+                <KPICard label="Revenue"    value={yearKpis.revenue} color="green" />
+                <KPICard label="Expense"    value={yearKpis.expense} color="red" />
+                <KPICard
+                  label="Net Profit"
+                  value={yearKpis.profit}
+                  sub={`Margin: ${yearKpis.margin}%`}
+                  badge={Number(yearKpis.margin)}
+                  color={yearKpis.profit >= 0 ? 'blue' : 'red'}
+                />
+              </div>
+            </div>
+
+            {/* ── Outstanding balances ── */}
+            <div className="kpi-row-group">
+              <div className="kpi-row-label">Outstanding Balances</div>
+              <div className="kpi-grid-2">
+                <KPICard label="AR Outstanding" value={kpis?.total_ar} sub={`Overdue >30d: ${fmt(kpis?.overdue_ar)}`} color="teal" />
+                <KPICard label="AP Outstanding" value={kpis?.total_ap} sub={`Overdue >30d: ${fmt(kpis?.overdue_ap)}`} color="purple" />
+              </div>
+            </div>
+
             <div className="charts-row">
               <MonthlyChart
                 data={monthlyPnl}
-                selectedMonth={{ month, year }}
+                selectedMonth={chartSelectedMonth}
                 onBarClick={(m, y) => {
                   if (m === null) {
-                    setMonth(now.getMonth() + 1)
-                    setYear(now.getFullYear())
+                    setSelectedMonths([now.getMonth() + 1])
+                    setSelectedYears([now.getFullYear()])
                   } else {
-                    setMonth(m)
-                    setYear(y)
+                    setSelectedMonths([m])
+                    setSelectedYears([y])
                   }
                 }}
               />
@@ -470,7 +577,7 @@ export default function App() {
             company_name: dbLabel,
             db: effectiveDbs[0],
             company_ids: selectedEntities.length > 0 ? selectedEntities.join(',') : null,
-            year, month,
+            year: primaryYear, month: primaryMonth,
             kpis:         kpis || {},
             monthly_pnl:  monthlyPnl,
             ar_customers: arCustomers.slice(0, 10),
