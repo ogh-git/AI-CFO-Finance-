@@ -55,6 +55,11 @@ const del = (path) => fetch(BASE + path, {
 
 // company_ids: array of ints or null → "1,2,8" or ""
 const cids = (ids) => ids && ids.length ? `&company_ids=${ids.join(',')}` : ''
+const period = (years, months) => {
+  const y = years  && years.length  ? `&year=${years.join(',')}`   : ''
+  const m = months && months.length ? `&month=${months.join(',')}` : ''
+  return y + m
+}
 
 export const api = {
   // auth
@@ -67,8 +72,8 @@ export const api = {
 
   // data
   companies:      ()                              => get('/companies'),
-  cash:           (db, ids)                       => get(`/cash?db=${db}&limit=100${cids(ids)}`),
-  invoices:       (db, ids)                       => get(`/invoices?db=${db}&limit=100${cids(ids)}`),
+  cash:           (db, ids, years, months)        => get(`/cash?db=${db}&limit=100${cids(ids)}${period(years, months)}`),
+  invoices:       (db, ids, years, months)        => get(`/invoices?db=${db}&limit=100${cids(ids)}${period(years, months)}`),
   trialBalance:   (db, ids)                       => get(`/trial-balance?db=${db}${cids(ids)}`),
   partners:       (db)                            => get(`/partners?db=${db}&limit=200`),
   journals:       (db, ids)                       => get(`/journals?db=${db}${cids(ids)}`),

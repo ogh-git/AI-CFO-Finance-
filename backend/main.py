@@ -703,7 +703,8 @@ async def trial_balance(db: str = Query("ogh-live"), company_ids: str = Query(No
 # ─────────────────────────────────────────────
 @app.get("/api/cash")
 async def cash(db: str = Query("ogh-live"), limit: int = Query(100),
-               company_ids: str = Query(None)):
+               company_ids: str = Query(None),
+               year: str = Query(None), month: str = Query(None)):
     sql = """
         SELECT
             am.name                 AS payment_reference,
@@ -724,11 +725,15 @@ async def cash(db: str = Query("ogh-live"), limit: int = Query(100),
         WHERE am.state = 'posted'
           AND aj.type IN ('bank','cash')
           AND ($2::int[] IS NULL OR am.company_id = ANY($2::int[]))
+          AND ($3::int[] IS NULL OR EXTRACT(YEAR  FROM am.date)::int = ANY($3::int[]))
+          AND ($4::int[] IS NULL OR EXTRACT(MONTH FROM am.date)::int = ANY($4::int[]))
         ORDER BY am.date DESC
         LIMIT $1
     """
-    ids = parse_ids(company_ids)
-    rows = await fetch(db, sql, limit, ids)
+    ids    = parse_ids(company_ids)
+    years  = parse_ids(year)
+    months = parse_ids(month)
+    rows = await fetch(db, sql, limit, ids, years, months)
     return {"data": rows}
 
 
@@ -737,7 +742,8 @@ async def cash(db: str = Query("ogh-live"), limit: int = Query(100),
 # ─────────────────────────────────────────────
 @app.get("/api/invoices")
 async def invoices(db: str = Query("ogh-live"), limit: int = Query(100),
-                   company_ids: str = Query(None)):
+                   company_ids: str = Query(None),
+                   year: str = Query(None), month: str = Query(None)):
     sql = """
         SELECT
             am.name                 AS invoice_number,
@@ -766,11 +772,15 @@ async def invoices(db: str = Query("ogh-live"), limit: int = Query(100),
         WHERE am.state = 'posted'
           AND am.move_type IN ('out_invoice','out_refund')
           AND ($2::int[] IS NULL OR am.company_id = ANY($2::int[]))
+          AND ($3::int[] IS NULL OR EXTRACT(YEAR  FROM am.invoice_date)::int = ANY($3::int[]))
+          AND ($4::int[] IS NULL OR EXTRACT(MONTH FROM am.invoice_date)::int = ANY($4::int[]))
         ORDER BY am.invoice_date DESC
         LIMIT $1
     """
-    ids = parse_ids(company_ids)
-    rows = await fetch(db, sql, limit, ids)
+    ids    = parse_ids(company_ids)
+    years  = parse_ids(year)
+    months = parse_ids(month)
+    rows = await fetch(db, sql, limit, ids, years, months)
     return {"data": rows}
 
 

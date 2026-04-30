@@ -472,6 +472,8 @@ export default function App() {
           <Transactions
             db={effectiveDbs[0]}
             ids={selectedEntities.length > 0 ? selectedEntities : null}
+            years={selectedYears}
+            months={selectedMonths}
           />
         )}
 

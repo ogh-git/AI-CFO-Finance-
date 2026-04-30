@@ -75,14 +75,14 @@ function EmptyRow({ cols }) {
 
 /* ── Individual tab panels ── */
 
-function CashTab({ db, ids }) {
+function CashTab({ db, ids, years, months }) {
   const [data, setData]   = useState([])
   const [busy, setBusy]   = useState(false)
   const [err,  setErr]    = useState(null)
   useEffect(() => {
     setBusy(true); setErr(null)
-    api.cash(db, ids).then(r => setData(r.data || [])).catch(e => setErr(e.message)).finally(() => setBusy(false))
-  }, [db, ids?.join(',')])
+    api.cash(db, ids, years, months).then(r => setData(r.data || [])).catch(e => setErr(e.message)).finally(() => setBusy(false))
+  }, [db, ids?.join(','), years?.join(','), months?.join(',')])
   return (
     <div className="table-wrap">
       <table>
@@ -122,14 +122,14 @@ function CashTab({ db, ids }) {
   )
 }
 
-function InvoicesTab({ db, ids }) {
+function InvoicesTab({ db, ids, years, months }) {
   const [data, setData]   = useState([])
   const [busy, setBusy]   = useState(false)
   const [err,  setErr]    = useState(null)
   useEffect(() => {
     setBusy(true); setErr(null)
-    api.invoices(db, ids).then(r => setData(r.data || [])).catch(e => setErr(e.message)).finally(() => setBusy(false))
-  }, [db, ids?.join(',')])
+    api.invoices(db, ids, years, months).then(r => setData(r.data || [])).catch(e => setErr(e.message)).finally(() => setBusy(false))
+  }, [db, ids?.join(','), years?.join(','), months?.join(',')])
   return (
     <div className="table-wrap">
       <table>
@@ -376,7 +376,7 @@ function TrialTab({ db, ids }) {
 }
 
 /* ── Main component ── */
-export default function Transactions({ db, ids }) {
+export default function Transactions({ db, ids, years, months }) {
   const [tab, setTab] = useState('cash')
 
   return (
@@ -394,8 +394,8 @@ export default function Transactions({ db, ids }) {
       </div>
 
       <div className="card" style={{ overflow: 'hidden' }}>
-        {tab === 'cash'     && <CashTab     db={db} ids={ids} />}
-        {tab === 'invoices' && <InvoicesTab db={db} ids={ids} />}
+        {tab === 'cash'     && <CashTab     db={db} ids={ids} years={years} months={months} />}
+        {tab === 'invoices' && <InvoicesTab db={db} ids={ids} years={years} months={months} />}
         {tab === 'purchase' && <PurchaseTab db={db} ids={ids} />}
         {tab === 'partners' && <PartnersTab db={db} />}
         {tab === 'journals' && <JournalsTab db={db} ids={ids} />}
