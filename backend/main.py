@@ -307,10 +307,18 @@ async def companies():
 # ─────────────────────────────────────────────
 # /api/sub-companies
 # ─────────────────────────────────────────────
+_EXCLUDED_ENTITIES = {
+    "TSH HOLIDAY HOMES RENTAL",
+    "JORDAN PROMOTION HOUSE LLC",
+    "C H A MARTIAL ARTS",
+    "IMMERSEE HOLDING",
+}
+
 @app.get("/api/sub-companies")
 async def sub_companies(db: str = Query("ogh-live")):
     rows = await fetch(db, "SELECT id, name FROM res_company ORDER BY name")
-    return {"data": rows}
+    filtered = [r for r in rows if r["name"].strip().upper() not in _EXCLUDED_ENTITIES]
+    return {"data": filtered}
 
 
 # ─────────────────────────────────────────────
