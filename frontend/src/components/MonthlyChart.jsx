@@ -109,9 +109,9 @@ export default function MonthlyChart({ data, selectedMonth, onBarClick }) {
             type="monotone"
             dataKey="net_profit"
             name="Net Profit"
-            stroke="#58a6ff"
+            stroke="#7aab3a"
             strokeWidth={2}
-            dot={{ r: 3, fill: '#58a6ff' }}
+            dot={{ r: 3, fill: '#7aab3a' }}
             strokeOpacity={1}
           />
         </ComposedChart>

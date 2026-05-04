@@ -75,7 +75,7 @@ export default function PnLDetail({ data, period }) {
       <div style={{ borderTop: '1px solid #30363d', paddingTop: 12, display: 'flex', gap: 32, flexWrap: 'wrap' }}>
         {[
           { label: 'Gross Profit', value: grossProfit, color: grossProfit >= 0 ? '#3fb950' : '#f85149' },
-          { label: 'EBIT',         value: ebit,        color: ebit >= 0 ? '#58a6ff' : '#f85149' },
+          { label: 'EBIT',         value: ebit,        color: ebit >= 0 ? '#7aab3a' : '#f85149' },
           { label: 'Gross Margin', value: revenue ? (grossProfit / revenue * 100).toFixed(1) + '%' : '–', color: '#8b949e' },
         ].map(({ label, value, color }) => (
           <div key={label}>

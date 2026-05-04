@@ -85,9 +85,9 @@ export default function YearlySummary({ data }) {
               type="monotone"
               dataKey="net_profit"
               name="Net Profit"
-              stroke="#58a6ff"
+              stroke="#7aab3a"
               strokeWidth={2.5}
-              dot={{ r: 4, fill: '#58a6ff', strokeWidth: 0 }}
+              dot={{ r: 4, fill: '#7aab3a', strokeWidth: 0 }}
               activeDot={{ r: 6 }}
             />
           </ComposedChart>
@@ -126,7 +126,7 @@ export default function YearlySummary({ data }) {
                     <td><GrowthBadge pct={yoy(r, prev, 'total_revenue')} /></td>
                     <td style={{ color: '#f85149' }}>{fmt(r.total_expense)}</td>
                     <td><GrowthBadge pct={yoy(r, prev, 'total_expense')} /></td>
-                    <td style={{ fontWeight: 600, color: r.net_profit >= 0 ? '#58a6ff' : '#f85149' }}>
+                    <td style={{ fontWeight: 600, color: r.net_profit >= 0 ? '#7aab3a' : '#f85149' }}>
                       {fmt(r.net_profit)}
                     </td>
                     <td><GrowthBadge pct={yoy(r, prev, 'net_profit')} /></td>

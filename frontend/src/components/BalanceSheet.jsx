@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { fmt } from '../api'
 
 const ORDER  = ['Asset', 'Liability', 'Equity', 'Retained Earnings']
-const COLORS = { Asset: '#3fb950', Liability: '#f85149', Equity: '#58a6ff', 'Retained Earnings': '#bc8cff' }
+const COLORS = { Asset: '#3fb950', Liability: '#f85149', Equity: '#7aab3a', 'Retained Earnings': '#bc8cff' }
 
 export default function BalanceSheet({ data }) {
   const [collapsed, setCollapsed] = useState(() => Object.fromEntries(ORDER.map(c => [c, true])))
@@ -31,7 +31,7 @@ export default function BalanceSheet({ data }) {
         {[
           { label: 'Total Assets',      value: totalAssets, color: '#3fb950' },
           { label: 'Total Liabilities', value: totalLiab,   color: '#f85149' },
-          { label: 'Total Equity',      value: totalEquity, color: '#58a6ff' },
+          { label: 'Total Equity',      value: totalEquity, color: '#7aab3a' },
         ].map(({ label, value, color }) => (
           <div key={label} style={{ flex: '1 1 140px' }}>
             <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 2 }}>{label}</div>

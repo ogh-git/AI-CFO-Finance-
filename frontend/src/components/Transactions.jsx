@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import * as XLSX from 'xlsx'
 import { api, fmt, fmtDate } from '../api'
 
 const TABS = [
@@ -12,7 +13,7 @@ const TABS = [
 
 const AGING_COLOR = {
   'Paid':        { bg: 'rgba(63,185,80,.12)',  color: '#3fb950' },
-  'Current':     { bg: 'rgba(88,166,255,.12)', color: '#58a6ff' },
+  'Current':     { bg: 'rgba(122,171,58,.12)',  color: '#7aab3a' },
   '1-30 Days':   { bg: 'rgba(210,153,34,.15)', color: '#d29922' },
   '31-60 Days':  { bg: 'rgba(210,153,34,.2)',  color: '#d29922' },
   '61-90 Days':  { bg: 'rgba(248,81,73,.15)',  color: '#f85149' },
@@ -24,7 +25,7 @@ const PAY_COLOR = {
   'paid':         { bg: 'rgba(63,185,80,.12)',  color: '#3fb950' },
   'partial':      { bg: 'rgba(210,153,34,.15)', color: '#d29922' },
   'not_paid':     { bg: 'rgba(248,81,73,.15)',  color: '#f85149' },
-  'in_payment':   { bg: 'rgba(88,166,255,.12)', color: '#58a6ff' },
+  'in_payment':   { bg: 'rgba(122,171,58,.12)',  color: '#7aab3a' },
   'reversed':     { bg: 'rgba(139,148,158,.15)',color: '#8b949e' },
 }
 
@@ -49,7 +50,7 @@ const MOVE_LABEL = {
 
 const JOURNAL_TYPE_COLOR = {
   sale:     '#3fb950', purchase: '#f85149',
-  bank:     '#58a6ff', cash:     '#bc8cff',
+  bank:     '#7aab3a', cash:     '#bc8cff',
   general:  '#d29922',
 }
 
@@ -122,6 +123,26 @@ function CashTab({ db, ids, years, months }) {
   )
 }
 
+function downloadInvoicesXlsx(data) {
+  const rows = data.map(r => ({
+    'Invoice #':    r.invoice_number,
+    'Date':         r.invoice_date ? fmtDate(r.invoice_date) : '–',
+    'Customer':     r.customer,
+    'Due Date':     r.due_date ? fmtDate(r.due_date) : '–',
+    'Currency':     r.currency,
+    'Total':        Number(r.total_amount) || 0,
+    'Amount Due':   Number(r.amount_due)   || 0,
+    'Status':       r.aging_bucket,
+    'Days Overdue': r.days_overdue > 0 ? r.days_overdue : 0,
+  }))
+  const ws = XLSX.utils.json_to_sheet(rows)
+  const colWidths = [16, 14, 32, 14, 10, 16, 16, 14, 12]
+  ws['!cols'] = colWidths.map(w => ({ wch: w }))
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Invoices')
+  XLSX.writeFile(wb, `invoices_${new Date().toISOString().slice(0,10)}.xlsx`)
+}
+
 function InvoicesTab({ db, ids, years, months }) {
   const [data, setData]   = useState([])
   const [busy, setBusy]   = useState(false)
@@ -131,7 +152,26 @@ function InvoicesTab({ db, ids, years, months }) {
     api.invoices(db, ids, years, months).then(r => setData(r.data || [])).catch(e => setErr(e.message)).finally(() => setBusy(false))
   }, [db, ids?.join(','), years?.join(','), months?.join(',')])
   return (
-    <div className="table-wrap">
+    <>
+      <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:10 }}>
+        <button
+          onClick={() => downloadInvoicesXlsx(data)}
+          disabled={!data.length}
+          style={{
+            display:'flex', alignItems:'center', gap:6,
+            padding:'6px 14px', borderRadius:6, border:'1px solid #30363d',
+            background:'#161b22', color: data.length ? '#3fb950' : '#484f58',
+            fontSize:12, fontWeight:600, cursor: data.length ? 'pointer' : 'not-allowed',
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z"/>
+            <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.97a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.779a.749.749 0 1 1 1.06-1.06l1.97 1.97Z"/>
+          </svg>
+          Download Excel
+        </button>
+      </div>
+      <div className="table-wrap">
       <table>
         <thead>
           <tr>
@@ -166,7 +206,8 @@ function InvoicesTab({ db, ids, years, months }) {
           ))}
         </tbody>
       </table>
-    </div>
+      </div>
+    </>
   )
 }
 
@@ -228,7 +269,7 @@ function PartnersTab({ db }) {
     api.partners(db).then(r => setData(r.data || [])).catch(e => setErr(e.message)).finally(() => setBusy(false))
   }, [db])
   const PTYPE_COLOR = {
-    'Customer': '#3fb950', 'Vendor': '#f85149', 'Customer & Vendor': '#58a6ff'
+    'Customer': '#3fb950', 'Vendor': '#f85149', 'Customer & Vendor': '#7aab3a'
   }
   const lf = filter.toLowerCase()
   const visible = filter ? data.filter(r => r.partner_name?.toLowerCase().includes(lf)) : data
