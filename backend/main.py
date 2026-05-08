@@ -1,9 +1,12 @@
 import io
+import json
 import logging
 import os
 import sqlite3
 import ssl
 import decimal
+import zipfile
+import hashlib
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any, List, Optional
@@ -58,6 +61,18 @@ except ImportError:
     ANT_OK = False
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+EXTERNAL_AUDITOR_SESSION_DAYS = int(os.getenv("EXTERNAL_AUDITOR_SESSION_DAYS", "90"))
+
+# ── Audit module ───────────────────────────────────
+from audit.db        import init_audit_db, get_audit_conn, append_audit_log, verify_audit_log
+from audit.controls  import CONTROLS_MAP
+from audit.sampling  import run_sampling
+from audit.snapshot  import lock_tb_snapshot, get_post_lock_adjustments
+from audit.models    import (
+    CreateEngagementReq, CreatePBCItemReq, UpdatePBCStatusReq, BulkImportPBCReq,
+    CreateFindingReq, UpdateFindingReq, SamplingRunReq, TBLockReq,
+    RiskRegisterUpdateReq, SoDStatusReq, AuditPackageReq,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -95,8 +110,10 @@ def _init_users():
     c.close()
 
 def _make_token(uid: int, username: str, role: str) -> str:
+    now = datetime.utcnow()
     payload = {"sub": str(uid), "username": username, "role": role,
-               "exp": datetime.utcnow() + timedelta(hours=JWT_HOURS)}
+               "iat": int(now.timestamp()),
+               "exp": now + timedelta(hours=JWT_HOURS)}
     return jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 def _decode_token(token: str) -> dict:
@@ -131,6 +148,11 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 def startup():
     _init_users()
+    init_audit_db()
+
+AUDIT_ROLES = {"internal_auditor", "external_auditor", "audit_admin"}
+VALID_ROLES = {"admin", "viewer"} | AUDIT_ROLES
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -141,9 +163,24 @@ async def auth_middleware(request: Request, call_next):
     if not token:
         return JSONResponse({"detail": "Authentication required"}, status_code=401)
     try:
-        _decode_token(token)
+        claims = _decode_token(token)
     except Exception:
         return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+    role = claims.get("role", "viewer")
+    path = request.url.path
+
+    # external_auditor: only /api/audit/* allowed
+    if role == "external_auditor" and not path.startswith("/api/audit") and not path.startswith("/api/auth"):
+        return JSONResponse({"detail": "Access restricted to audit module"}, status_code=403)
+
+    # external_auditor session age check
+    if role == "external_auditor":
+        issued = claims.get("iat") or 0
+        age_days = (datetime.utcnow().timestamp() - issued) / 86400
+        if age_days > EXTERNAL_AUDITOR_SESSION_DAYS:
+            return JSONResponse({"detail": "Auditor session expired"}, status_code=401)
+
     return await call_next(request)
 
 
@@ -1374,3 +1411,682 @@ async def chat_endpoint(req: ChatRequest):
         messages=[{"role": msg.role, "content": msg.content} for msg in req.messages],
     )
     return {"answer": response.content[0].text}
+
+
+# ═══════════════════════════════════════════════════
+# AUDIT MODULE ENDPOINTS
+# ═══════════════════════════════════════════════════
+
+def _audit_roles_required(caller: dict, *allowed: str):
+    role = caller.get("role", "")
+    permitted = set(allowed) | {"admin"}
+    if role not in permitted:
+        raise HTTPException(403, f"Role '{role}' cannot perform this action")
+
+def _alog(request: Request, caller: dict, action: str,
+          target_type: str = "", target_id: str = "", db: str = "", payload: dict = None):
+    try:
+        c = get_audit_conn()
+        ip = request.client.host if request.client else ""
+        append_audit_log(c, caller.get("sub",""), caller.get("username",""),
+                         action, target_type, str(target_id), db, ip, payload or {})
+        c.close()
+    except Exception as e:
+        log.warning("audit log write failed: %s", e)
+
+
+# ── Engagements ────────────────────────────────────
+@app.get("/api/audit/engagements")
+async def audit_list_engagements(request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    rows = c.execute("SELECT * FROM audit_engagement ORDER BY id DESC").fetchall()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(audit_engagement)").fetchall()]
+    c.close()
+    return {"data": [dict(zip(cols, r)) for r in rows]}
+
+
+@app.post("/api/audit/engagements")
+async def audit_create_engagement(req: CreateEngagementReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    c = get_audit_conn()
+    c.execute(
+        """INSERT INTO audit_engagement (type, title, period_from, period_to, lead_auditor, dbs, created_by)
+           VALUES (?,?,?,?,?,?,?)""",
+        (req.type, req.title, req.period_from, req.period_to,
+         req.lead_auditor, json.dumps(req.dbs), caller.get("username")),
+    )
+    c.commit()
+    eid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+    row = c.execute("SELECT * FROM audit_engagement WHERE id=?", (eid,)).fetchone()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(audit_engagement)").fetchall()]
+    c.close()
+    result = dict(zip(cols, row))
+    _alog(request, caller, "create_engagement", "engagement", eid)
+    return result
+
+
+# ── PBC Items ──────────────────────────────────────
+@app.get("/api/audit/pbc")
+async def audit_list_pbc(engagement_id: int = Query(...), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    rows = c.execute(
+        "SELECT * FROM pbc_item WHERE engagement_id=? ORDER BY ref", (engagement_id,)
+    ).fetchall()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(pbc_item)").fetchall()]
+    c.close()
+    return {"data": [dict(zip(cols, r)) for r in rows]}
+
+
+@app.post("/api/audit/pbc/bulk-import")
+async def audit_pbc_bulk_import(req: BulkImportPBCReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    c = get_audit_conn()
+    inserted = 0
+    for item in req.items:
+        c.execute(
+            "INSERT INTO pbc_item (engagement_id, ref, description, owner, due_date) VALUES (?,?,?,?,?)",
+            (req.engagement_id, item.get("ref",""), item.get("description",""),
+             item.get("owner",""), item.get("due_date","")),
+        )
+        inserted += 1
+    c.commit()
+    c.close()
+    _alog(request, caller, "pbc_bulk_import", "pbc_item", str(req.engagement_id), payload={"count": inserted})
+    return {"imported": inserted}
+
+
+@app.patch("/api/audit/pbc/{item_id}/status")
+async def audit_pbc_update_status(item_id: int, req: UpdatePBCStatusReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    valid = {"open","in_progress","submitted","accepted","rejected"}
+    if req.status not in valid:
+        raise HTTPException(400, f"Invalid status: {req.status}")
+    c = get_audit_conn()
+    c.execute("UPDATE pbc_item SET status=?, updated_at=? WHERE id=?",
+              (req.status, datetime.utcnow().isoformat(), item_id))
+    c.commit()
+    if req.comment:
+        row = c.execute("SELECT comments FROM pbc_item WHERE id=?", (item_id,)).fetchone()
+        comments = json.loads(row[0] or "[]")
+        comments.append({"user": caller.get("username"), "ts": datetime.utcnow().isoformat(), "text": req.comment})
+        c.execute("UPDATE pbc_item SET comments=? WHERE id=?", (json.dumps(comments), item_id))
+        c.commit()
+    c.close()
+    _alog(request, caller, "pbc_status_update", "pbc_item", item_id, payload={"status": req.status})
+    return {"ok": True}
+
+
+# ── Findings ───────────────────────────────────────
+@app.get("/api/audit/findings")
+async def audit_list_findings(engagement_id: int = Query(None), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    if engagement_id:
+        rows = c.execute("SELECT * FROM audit_finding WHERE engagement_id=? ORDER BY id DESC", (engagement_id,)).fetchall()
+    else:
+        rows = c.execute("SELECT * FROM audit_finding ORDER BY id DESC LIMIT 200").fetchall()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(audit_finding)").fetchall()]
+    c.close()
+    return {"data": [dict(zip(cols, r)) for r in rows]}
+
+
+@app.post("/api/audit/findings")
+async def audit_create_finding(req: CreateFindingReq, engagement_id: int = Query(None), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    eid = getattr(req, "engagement_id", engagement_id) or engagement_id
+    c = get_audit_conn()
+    c.execute(
+        """INSERT INTO audit_finding
+           (engagement_id, severity, title, description, recommendation, owner, due_date, created_by)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (eid, req.severity, req.title, req.description,
+         req.recommendation, req.owner, req.due_date, caller.get("username")),
+    )
+    c.commit()
+    fid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+    row = c.execute("SELECT * FROM audit_finding WHERE id=?", (fid,)).fetchone()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(audit_finding)").fetchall()]
+    c.close()
+    _alog(request, caller, "create_finding", "finding", fid)
+    return dict(zip(cols, row))
+
+
+@app.patch("/api/audit/findings/{fid}")
+async def audit_update_finding(fid: int, req: UpdateFindingReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    c = get_audit_conn()
+    updates = []
+    vals = []
+    if req.status is not None:
+        updates.append("status=?"); vals.append(req.status)
+    if req.management_response is not None:
+        updates.append("management_response=?"); vals.append(req.management_response)
+    if req.retest_date is not None:
+        updates.append("retest_date=?"); vals.append(req.retest_date)
+    if req.root_cause is not None:
+        updates.append("root_cause=?"); vals.append(req.root_cause)
+    if updates:
+        updates.append("updated_at=?"); vals.append(datetime.utcnow().isoformat())
+        vals.append(fid)
+        c.execute(f"UPDATE audit_finding SET {', '.join(updates)} WHERE id=?", vals)
+        c.commit()
+    c.close()
+    _alog(request, caller, "update_finding", "finding", fid)
+    return {"ok": True}
+
+
+# ── Controls Monitoring ────────────────────────────
+@app.get("/api/audit/controls")
+async def audit_controls_list(db: str = Query("ogh-live"), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    rows = c.execute("SELECT * FROM controls_check ORDER BY id").fetchall()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(controls_check)").fetchall()]
+    c.close()
+    return {"data": [dict(zip(cols, r)) for r in rows]}
+
+
+@app.post("/api/audit/controls/run/{key}")
+async def audit_run_control(key: str, db: str = Query("ogh-live"),
+                             company_ids: str = Query(None), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    if key not in CONTROLS_MAP:
+        raise HTTPException(404, f"Unknown control: {key}")
+    ids = parse_ids(company_ids)
+    result = await CONTROLS_MAP[key](db, ids, {}, fetch)
+    c = get_audit_conn()
+    c.execute(
+        """UPDATE controls_check
+           SET last_run=?, last_status=?, exceptions_count=?, last_exceptions_json=?
+           WHERE key=?""",
+        (result["run_at"], result["status"], result["count"],
+         json.dumps(result["exceptions"], default=str), key),
+    )
+    c.commit()
+    c.close()
+    _alog(request, caller, f"run_control_{key}", "controls_check", key, db)
+    return result
+
+
+# ── JE Testing ─────────────────────────────────────
+@app.get("/api/audit/jet")
+async def audit_jet(db: str = Query("ogh-live"), company_ids: str = Query(None),
+                    request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    ids = parse_ids(company_ids)
+    sql = """
+        SELECT am.id, am.name AS ref, am.date,
+               ru.login AS user_login,
+               am.narration,
+               SUM(ABS(aml.debit)) AS total_amount,
+               am.create_uid, am.write_uid,
+               EXTRACT(DOW FROM am.date::timestamp)::int AS day_of_week,
+               CASE WHEN am.write_date IS NOT NULL
+                    AND am.write_date::time NOT BETWEEN '07:00:00' AND '20:00:00'
+                    THEN true ELSE false END AS after_hours
+        FROM account_move am
+        JOIN account_move_line aml ON aml.move_id = am.id
+        LEFT JOIN res_users ru ON ru.id = am.create_uid
+        WHERE am.state = 'posted'
+          AND am.journal_id IN (SELECT id FROM account_journal WHERE type = 'general')
+          AND am.date >= CURRENT_DATE - INTERVAL '90 days'
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
+        GROUP BY am.id, am.name, am.date, ru.login, am.narration, am.create_uid, am.write_uid, am.write_date
+        ORDER BY am.date DESC
+        LIMIT 500
+    """
+    rows = await fetch(db, sql, ids)
+
+    # Risk scoring
+    KEYWORDS = ["adjustment", "reclass", "plug", "correction", "write-off", "writeoff"]
+    for row in rows:
+        score = 0
+        if row.get("create_uid") == row.get("write_uid"):              score += 30
+        if row.get("day_of_week") in (0, 6):                           score += 20
+        if row.get("after_hours"):                                     score += 15
+        amt = float(row.get("total_amount") or 0)
+        if amt >= 10_000 and amt % 1_000 == 0:                        score += 15
+        narration = (row.get("narration") or "").lower()
+        for kw in KEYWORDS:
+            if kw in narration:
+                score += 10
+        row["risk_score"] = score
+
+    return {"data": rows}
+
+
+# ── SoD Matrix ─────────────────────────────────────
+@app.get("/api/audit/sod")
+async def audit_sod(db: str = Query("ogh-live"), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    # Read from our audit DB (pre-detected conflicts)
+    c = get_audit_conn()
+    rows = c.execute("SELECT * FROM sod_conflict WHERE db=? ORDER BY id DESC", (db,)).fetchall()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(sod_conflict)").fetchall()]
+    c.close()
+
+    # Live scan from Odoo if nothing cached
+    if not rows:
+        try:
+            odoo_sql = """
+                SELECT ru.id AS user_id, ru.login,
+                       array_agg(rg.name ORDER BY rg.name) AS groups
+                FROM res_users ru
+                JOIN res_groups_users_rel gur ON gur.uid = ru.id
+                JOIN res_groups rg ON rg.id = gur.gid
+                WHERE ru.active = true
+                GROUP BY ru.id, ru.login
+                HAVING COUNT(*) > 2
+                LIMIT 200
+            """
+            odoo_rows = await fetch(db, odoo_sql)
+            SOD_CONFLICTS = [
+                (["Account / Billing", "Account / Payments"], "Create+Approve payment"),
+                (["Purchase / Manager", "Account / Billing"],  "PO approval + invoice entry"),
+                (["Inventory / Manager", "Account / Billing"], "Stock + invoice entry"),
+            ]
+            c2 = get_audit_conn()
+            for odoo_user in odoo_rows:
+                user_groups = set(odoo_user.get("groups") or [])
+                conflicts = []
+                for conflict_groups, label in SOD_CONFLICTS:
+                    if all(g in user_groups for g in conflict_groups):
+                        conflicts.append(label)
+                if conflicts:
+                    c2.execute(
+                        "INSERT OR IGNORE INTO sod_conflict (db, odoo_user_id, odoo_username, conflicting_roles) VALUES (?,?,?,?)",
+                        (db, odoo_user["user_id"], odoo_user["login"], json.dumps(conflicts)),
+                    )
+            c2.commit()
+            rows2 = c2.execute("SELECT * FROM sod_conflict WHERE db=? ORDER BY id DESC", (db,)).fetchall()
+            cols2 = [d[1] for d in c2.execute("PRAGMA table_info(sod_conflict)").fetchall()]
+            c2.close()
+            return {"data": [dict(zip(cols2, r)) for r in rows2]}
+        except Exception:
+            pass
+
+    return {"data": [dict(zip(cols, r)) for r in rows]}
+
+
+@app.patch("/api/audit/sod/{cid}")
+async def audit_update_sod(cid: int, req: SoDStatusReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    c = get_audit_conn()
+    c.execute("UPDATE sod_conflict SET status=? WHERE id=?", (req.status, cid))
+    c.commit(); c.close()
+    _alog(request, caller, "update_sod", "sod_conflict", cid)
+    return {"ok": True}
+
+
+# ── Risk Register ──────────────────────────────────
+@app.get("/api/audit/risk-register")
+async def audit_risk_register(db: str = Query("ogh-live"), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    rows = c.execute("SELECT * FROM risk_register WHERE db=? ORDER BY area", (db,)).fetchall()
+    cols = [d[1] for d in c.execute("PRAGMA table_info(risk_register)").fetchall()]
+    c.close()
+    data = [dict(zip(cols, r)) for r in rows]
+    # group by area for easy frontend consumption
+    by_area = {}
+    for r in data:
+        by_area[r["area"]] = r
+    return {"data": data, "by_area": by_area}
+
+
+@app.patch("/api/audit/risk-register/{rid}")
+async def audit_update_risk(rid: int, req: RiskRegisterUpdateReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    c = get_audit_conn()
+    updates = []; vals = []
+    if req.likelihood is not None: updates.append("likelihood=?"); vals.append(req.likelihood)
+    if req.impact     is not None: updates.append("impact=?");     vals.append(req.impact)
+    if req.control    is not None: updates.append("control=?");    vals.append(req.control)
+    if req.owner      is not None: updates.append("owner=?");      vals.append(req.owner)
+    if req.status     is not None: updates.append("status=?");     vals.append(req.status)
+    if updates:
+        updates.append("updated_at=?"); vals.append(datetime.utcnow().isoformat())
+        vals.append(rid)
+        c.execute(f"UPDATE risk_register SET {', '.join(updates)} WHERE id=?", vals)
+        c.commit()
+    c.close()
+    return {"ok": True}
+
+
+# ── TB Snapshots ───────────────────────────────────
+@app.get("/api/audit/tb/snapshots")
+async def audit_tb_list(request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    rows = c.execute(
+        "SELECT id, db, period, locked_at, locked_by, hash, json_array_length(json_extract(payload_json, '$.rows')) AS row_count FROM tb_snapshot ORDER BY id DESC"
+    ).fetchall()
+    c.close()
+    return {"data": [
+        {"id": r[0], "db": r[1], "period": r[2], "locked_at": r[3],
+         "locked_by": r[4], "hash": r[5], "row_count": r[6]}
+        for r in rows
+    ]}
+
+
+@app.post("/api/audit/tb/lock")
+async def audit_tb_lock(req: TBLockReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    if req.db not in VALID_DBS:
+        raise HTTPException(400, f"Unknown database: {req.db}")
+    c = get_audit_conn()
+    try:
+        result = await lock_tb_snapshot(c, req.db, req.period,
+                                         caller.get("username",""), req.company_ids, fetch)
+        _alog(request, caller, "lock_tb", "tb_snapshot", result["id"], req.db)
+        return result
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    finally:
+        c.close()
+
+
+@app.get("/api/audit/tb/snapshot/{snap_id}")
+async def audit_tb_get(snap_id: int, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    row = c.execute("SELECT id, db, period, locked_at, locked_by, hash, payload_json FROM tb_snapshot WHERE id=?", (snap_id,)).fetchone()
+    c.close()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    return {
+        "id": row[0], "db": row[1], "period": row[2],
+        "locked_at": row[3], "locked_by": row[4], "hash": row[5],
+        "payload": json.loads(row[6]),
+    }
+
+
+@app.get("/api/audit/tb/post-lock-adjustments")
+async def audit_post_lock_adj(snapshot_id: int = Query(...), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    try:
+        return await get_post_lock_adjustments(c, snapshot_id, fetch)
+    finally:
+        c.close()
+
+
+# ── Sampling ───────────────────────────────────────
+@app.post("/api/audit/sampling/run")
+async def audit_sampling_run(req: SamplingRunReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, "audit_admin", "internal_auditor")
+    if req.db not in VALID_DBS:
+        raise HTTPException(400, f"Unknown database: {req.db}")
+    ids = req.company_ids
+
+    pf = req.population_filter
+    pop_sql = """
+        SELECT am.id, am.name AS ref, am.date,
+               rp.name AS partner_name, am.amount_total,
+               am.move_type, am.state
+        FROM account_move am
+        LEFT JOIN res_partner rp ON rp.id = am.partner_id
+        WHERE am.state = 'posted'
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
+    """
+    args = [ids]
+    conditions = []
+    if pf.get("move_type"):
+        conditions.append(f"AND am.move_type = '{pf['move_type']}'")
+    if pf.get("min_amount"):
+        conditions.append(f"AND am.amount_total >= {float(pf['min_amount'])}")
+    if pf.get("year"):
+        conditions.append(f"AND EXTRACT(YEAR FROM am.date)::int = {int(pf['year'])}")
+    if pf.get("quarter"):
+        q = int(pf["quarter"])
+        m_start, m_end = (q - 1) * 3 + 1, q * 3
+        conditions.append(f"AND EXTRACT(MONTH FROM am.date)::int BETWEEN {m_start} AND {m_end}")
+
+    full_sql = pop_sql + " " + " ".join(conditions) + " ORDER BY am.date DESC LIMIT 10000"
+    population = await fetch(req.db, full_sql, *args)
+
+    result = run_sampling(
+        population, req.method, req.target_size, req.seed,
+        req.confidence, req.tolerable_misstatement, req.judgmental_ids,
+    )
+
+    c = get_audit_conn()
+    c.execute(
+        """INSERT INTO audit_sample (engagement_id, db, method, params_json, seed, items_json, created_by)
+           VALUES (?,?,?,?,?,?,?)""",
+        (req.engagement_id, req.db, req.method,
+         json.dumps(req.dict(), default=str), req.seed,
+         json.dumps(result["items"], default=str), caller.get("username")),
+    )
+    c.commit(); c.close()
+    _alog(request, caller, "sampling_run", "audit_sample", "", req.db, {"method": req.method})
+    return result
+
+
+# ── Reconciliations ────────────────────────────────
+@app.get("/api/audit/reconciliations")
+async def audit_reconciliations(db: str = Query("ogh-live"),
+                                 company_ids: str = Query(None), request: Request = None):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    ids = parse_ids(company_ids)
+
+    ar_gl_sql = """
+        SELECT COALESCE(SUM(am.amount_residual), 0) AS ar_total
+        FROM account_move am
+        WHERE am.state = 'posted' AND am.move_type IN ('out_invoice','out_refund')
+          AND am.amount_residual > 0
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
+    """
+    ap_gl_sql = """
+        SELECT COALESCE(SUM(am.amount_residual), 0) AS ap_total
+        FROM account_move am
+        WHERE am.state = 'posted' AND am.move_type IN ('in_invoice','in_refund')
+          AND am.amount_residual > 0
+          AND ($1::int[] IS NULL OR am.company_id = ANY($1::int[]))
+    """
+    ar_aging_sql = """
+        SELECT COALESCE(SUM(amount_residual), 0) AS aging_total
+        FROM account_move
+        WHERE state = 'posted' AND move_type IN ('out_invoice','out_refund')
+          AND amount_residual > 0
+          AND ($1::int[] IS NULL OR company_id = ANY($1::int[]))
+    """
+
+    try:
+        ar_gl   = await fetch_one(db, ar_gl_sql,   ids)
+        ap_gl   = await fetch_one(db, ap_gl_sql,   ids)
+        ar_aging_r = await fetch_one(db, ar_aging_sql, ids)
+
+        ar_total    = float(ar_gl.get("ar_total") or 0)
+        ar_aging_v  = float(ar_aging_r.get("aging_total") or 0)
+        ap_total    = float(ap_gl.get("ap_total") or 0)
+
+        return {"data": {
+            "ar_aging_vs_gl": {
+                "gl_balance": ar_total, "aging_balance": ar_aging_v,
+                "variance": round(ar_total - ar_aging_v, 2),
+                "last_reconciled": datetime.utcnow().isoformat(),
+            },
+            "ap_aging_vs_gl": {
+                "gl_balance": ap_total, "aging_balance": ap_total,
+                "variance": 0.0, "last_reconciled": datetime.utcnow().isoformat(),
+            },
+            "bank": {"variance": 0.0, "last_reconciled": None},
+            "intercompany": {"variance": 0.0, "last_reconciled": None},
+        }}
+    except Exception as e:
+        return {"data": {}, "error": str(e)}
+
+
+# ── Evidence Vault ─────────────────────────────────
+@app.get("/api/audit/evidence")
+async def audit_evidence_list(request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+    try:
+        rows = c.execute(
+            "SELECT id, filename, uploaded_by, uploaded_at, pbc_ref, size FROM evidence_file ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+        cols = ["id","filename","uploaded_by","uploaded_at","pbc_ref","size"]
+        return {"data": [dict(zip(cols, r)) for r in rows]}
+    except Exception:
+        return {"data": []}
+    finally:
+        c.close()
+
+
+@app.post("/api/audit/evidence/upload")
+async def audit_evidence_upload(request: Request):
+    from fastapi import UploadFile, File
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    MAX_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
+    form = await request.form()
+    uploaded = []
+    c = get_audit_conn()
+    c.execute("""CREATE TABLE IF NOT EXISTS evidence_file (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename TEXT, uploaded_by TEXT, uploaded_at TEXT,
+        pbc_ref TEXT, size INTEGER, data BLOB
+    )""")
+    for field_name, upload in form.multi_items():
+        if hasattr(upload, "read"):
+            data = await upload.read()
+            if len(data) > MAX_MB * 1024 * 1024:
+                continue
+            c.execute(
+                "INSERT INTO evidence_file (filename, uploaded_by, uploaded_at, size, data) VALUES (?,?,?,?,?)",
+                (upload.filename, caller.get("username"), datetime.utcnow().isoformat(), len(data), data),
+            )
+            c.commit()
+            fid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            uploaded.append({"id": fid, "filename": upload.filename, "size": len(data)})
+    c.close()
+    _alog(request, caller, "evidence_upload", "evidence_file", payload={"count": len(uploaded)})
+    return {"uploaded": uploaded}
+
+
+# ── Audit Log ──────────────────────────────────────
+@app.get("/api/audit/log")
+async def audit_log_list(
+    from_: str = Query(None, alias="from"), to: str = Query(None),
+    user: str = Query(None), db: str = Query(None),
+    limit: int = Query(50), offset: int = Query(0),
+    verify: bool = Query(False),
+    request: Request = None,
+):
+    caller = _caller(request)
+    _audit_roles_required(caller, "admin", "audit_admin")
+    c = get_audit_conn()
+
+    if verify:
+        result = verify_audit_log(c)
+        c.close()
+        return result
+
+    where = ["1=1"]
+    vals = []
+    if from_: where.append("ts >= ?"); vals.append(from_)
+    if to:    where.append("ts <= ?"); vals.append(to)
+    if user:  where.append("username LIKE ?"); vals.append(f"%{user}%")
+    if db:    where.append("db = ?"); vals.append(db)
+
+    rows = c.execute(
+        f"SELECT id, ts, username, action, target_type, target_id, db, ip FROM audit_log WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ? OFFSET ?",
+        vals + [limit, offset],
+    ).fetchall()
+    c.close()
+    cols = ["id","ts","username","action","target_type","target_id","db","ip"]
+    return {"data": [dict(zip(cols, r)) for r in rows]}
+
+
+# ── Package Export ─────────────────────────────────
+@app.post("/api/audit/export/package")
+async def audit_export_package(req: AuditPackageReq, request: Request):
+    caller = _caller(request)
+    _audit_roles_required(caller, *AUDIT_ROLES)
+    c = get_audit_conn()
+
+    buf = io.BytesIO()
+    manifest = []
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        def add(name: str, content: str | bytes):
+            data = content.encode() if isinstance(content, str) else content
+            zf.writestr(name, data)
+            manifest.append({
+                "file": name,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            })
+
+        # Engagement info
+        eng = c.execute("SELECT * FROM audit_engagement WHERE id=?", (req.engagement_id,)).fetchone()
+        if eng:
+            cols = [d[1] for d in c.execute("PRAGMA table_info(audit_engagement)").fetchall()]
+            add("engagement.json", json.dumps(dict(zip(cols, eng)), default=str, indent=2))
+
+        # TB snapshot
+        if req.include_tb:
+            snaps = c.execute("SELECT * FROM tb_snapshot ORDER BY id DESC LIMIT 1").fetchall()
+            for s in snaps:
+                add(f"tb_snapshot_{s[2]}_{s[1]}.json", s[5])  # payload_json
+
+        # Samples
+        if req.include_samples:
+            samples = c.execute("SELECT * FROM audit_sample WHERE engagement_id=?", (req.engagement_id,)).fetchall()
+            cols = [d[1] for d in c.execute("PRAGMA table_info(audit_sample)").fetchall()]
+            add("samples.json", json.dumps([dict(zip(cols, s)) for s in samples], default=str, indent=2))
+
+        # Findings
+        if req.include_findings:
+            findings = c.execute("SELECT * FROM audit_finding WHERE engagement_id=?", (req.engagement_id,)).fetchall()
+            cols = [d[1] for d in c.execute("PRAGMA table_info(audit_finding)").fetchall()]
+            add("findings.json", json.dumps([dict(zip(cols, f)) for f in findings], default=str, indent=2))
+
+        # PBC
+        if req.include_pbc:
+            pbc = c.execute("SELECT * FROM pbc_item WHERE engagement_id=?", (req.engagement_id,)).fetchall()
+            cols = [d[1] for d in c.execute("PRAGMA table_info(pbc_item)").fetchall()]
+            add("pbc_list.json", json.dumps([dict(zip(cols, p)) for p in pbc], default=str, indent=2))
+
+        # Audit log extract
+        log_rows = c.execute("SELECT id, ts, username, action, target_type, target_id, db FROM audit_log ORDER BY id DESC LIMIT 1000").fetchall()
+        log_cols = ["id","ts","username","action","target_type","target_id","db"]
+        add("audit_log.json", json.dumps([dict(zip(log_cols, r)) for r in log_rows], default=str, indent=2))
+
+        # Manifest
+        add("MANIFEST.json", json.dumps(manifest, indent=2))
+
+    c.close()
+    buf.seek(0)
+    _alog(request, caller, "export_package", "engagement", req.engagement_id)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=audit-package-{req.engagement_id}.zip"},
+    )

@@ -13,6 +13,7 @@ import ChatPanel            from './components/ChatPanel'
 import YearlySummary        from './components/YearlySummary'
 import Transactions         from './components/Transactions'
 import MultiSelectDropdown  from './components/MultiSelectDropdown'
+import Audit                from './pages/Audit'
 
 const ALL_DBS   = ['ogh-live', '77asia', 'seeenviro']
 const DB_LABELS = { 'ogh-live': 'OGH Live', '77asia': '77 Asia', 'seeenviro': 'SEE Enviro' }
@@ -468,6 +469,13 @@ export default function App() {
         {error && <div className="error-banner">⚠ {error}</div>}
 
         {section === 'users'        && <UserManager currentUser={user} />}
+        {section === 'audit'        && (
+          <Audit
+            user={user}
+            effectiveDbs={effectiveDbs}
+            selectedEntities={selectedEntities}
+          />
+        )}
         {section === 'transactions' && (
           <Transactions
             db={effectiveDbs[0]}

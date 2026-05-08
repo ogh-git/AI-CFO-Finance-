@@ -1,8 +1,11 @@
+const AUDIT_ROLES = new Set(['admin','internal_auditor','external_auditor','audit_admin'])
+
 const SECTIONS = [
   { id: 'summary',      icon: '◈', label: 'Summary'      },
   { id: 'details',      icon: '≡', label: 'Details'       },
   { id: 'transactions', icon: '⇄', label: 'Transactions'  },
-  { id: 'users',        icon: '⊙', label: 'Users'         },
+  { id: 'audit',        icon: '⛨', label: 'Audit',  auditOnly: true },
+  { id: 'users',        icon: '⊙', label: 'Users',  adminOnly: true },
 ]
 
 export default function Sidebar({ section, onSection, user, onLogout }) {
@@ -15,7 +18,11 @@ export default function Sidebar({ section, onSection, user, onLogout }) {
 
       {/* Nav */}
       <nav className="sidebar-nav">
-        {SECTIONS.map(s => (
+        {SECTIONS.filter(s => {
+          if (s.adminOnly) return user?.role === 'admin'
+          if (s.auditOnly) return AUDIT_ROLES.has(user?.role) || user?.role === 'admin'
+          return true
+        }).map(s => (
           <button
             key={s.id}
             className={`sidebar-nav-item ${section === s.id ? 'active' : ''}`}

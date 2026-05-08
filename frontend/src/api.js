@@ -88,6 +88,33 @@ export const api = {
   apVendors:     (db, ids)                       => get(`/ap-vendors?db=${db}&limit=25${cids(ids)}`),
   pnlDetail:     (db, year, month, ids)          => get(`/pnl-detail?db=${db}&year=${year}&month=${month}${cids(ids)}`),
   balanceSheet:  (db, ids)                       => get(`/balance-sheet?db=${db}${cids(ids)}`),
+
+  // audit
+  audit: {
+    engagements:        ()                        => get('/audit/engagements'),
+    createEngagement:   (body)                    => post('/audit/engagements', body),
+    pbc:                (engagementId)            => get(`/audit/pbc?engagement_id=${engagementId}`),
+    pbcBulkImport:      (body)                    => post('/audit/pbc/bulk-import', body),
+    pbcUpdateStatus:    (id, body)                => patch(`/audit/pbc/${id}/status`, body),
+    findings:           (engagementId)            => get(`/audit/findings?engagement_id=${engagementId}`),
+    createFinding:      (body)                    => post('/audit/findings', body),
+    updateFinding:      (id, body)                => patch(`/audit/findings/${id}`, body),
+    controls:           (db)                      => get(`/audit/controls?db=${db}`),
+    runControl:         (key, db, ids)            => post(`/audit/controls/run/${key}?db=${db}${cids(ids && [ids].flat())}`, {}),
+    jet:                (db, ids)                 => get(`/audit/jet?db=${db}${cids(ids)}`),
+    sod:                (db)                      => get(`/audit/sod?db=${db}`),
+    updateSod:          (id, body)                => patch(`/audit/sod/${id}`, body),
+    riskRegister:       (db)                      => get(`/audit/risk-register?db=${db}`),
+    tbSnapshots:        ()                        => get('/audit/tb/snapshots'),
+    lockTB:             (body)                    => post('/audit/tb/lock', body),
+    tbSnapshot:         (id)                      => get(`/audit/tb/snapshot/${id}`),
+    postLockAdj:        (snapshotId)              => get(`/audit/tb/post-lock-adjustments?snapshot_id=${snapshotId}`),
+    runningSample:      (body)                    => post('/audit/sampling/run', body),
+    reconciliations:    (db)                      => get(`/audit/reconciliations?db=${db}`),
+    evidence:           ()                        => get('/audit/evidence'),
+    log:                (params)                  => get(`/audit/log?${new URLSearchParams(params || {})}`),
+    exportPackage:      (body)                    => post('/audit/export/package', body),
+  },
 }
 
 export const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
